@@ -2,7 +2,7 @@
   "folium": 1,
   "id": "bili-live-song-request",
   "name": "B站点歌台",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "3911-3911",
   "description": "B站直播弹幕点歌：观众发送「点歌 歌名」自动搜索并播放或入队，支持「取消点歌」「切歌」「删除 N」。自带 OBS 展示页（点歌队列+播放卡片，127.0.0.1:32198）。播放经由宿主 Stage API（网易云音源），需在设置→集成中开启舞台模式。",
   "main": "index.cjs",

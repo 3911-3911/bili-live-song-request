@@ -37,6 +37,27 @@ export default function activate(folium) {
 
     const listeners = new Set();
 
+    // 捕获应用当前主题（叠加层 UI 跟随 Folia 原生样式）。
+    // 初始值在点歌台面板首次挂载时经 ctx.getTheme() 取得，之后由 theme.changed 维护。
+    let latestTheme = null;
+    const captureTheme = (theme) => {
+        if (!theme || typeof theme !== 'object') return;
+        latestTheme = {
+            background: theme.backgroundColor || null,
+            primary: theme.primaryColor || null,
+            secondary: theme.secondaryColor || null,
+            accent: theme.accentColor || null,
+            fontStack: (() => {
+                try {
+                    return folium.theme.resolveFontStack(theme) || null;
+                } catch (_err) {
+                    return null;
+                }
+            })(),
+            daylight: theme.isDaylight === true,
+        };
+    };
+
     // 把请求队列与连接状态推给 main 的 OBS 页面服务（节流）。
     let obsPushTimer = null;
     let obsPushQueued = false;
@@ -70,6 +91,7 @@ export default function activate(folium) {
                 connection: state.connection,
                 roomId: state.roomId,
                 current,
+                theme: latestTheme,
                 requests: state.requests.map((item) => ({
                     songId: item.songId,
                     title: item.title,
@@ -622,6 +644,7 @@ export default function activate(folium) {
         order: 520,
         mount(container, ctx) {
             const theme = ctx.getTheme();
+            captureTheme(theme);
             const root = document.createElement('div');
             root.style.cssText = 'display:flex;flex-direction:column;gap:10px;height:100%;min-height:0;font-family:var(--folium-font);';
             container.appendChild(root);
@@ -738,7 +761,11 @@ export default function activate(folium) {
             listeners.add(render);
             applyTheme(theme);
             render();
-            const unsubscribeTheme = ctx.subscribe(() => applyTheme(ctx.getTheme()));
+            const unsubscribeTheme = ctx.subscribe(() => {
+                applyTheme(ctx.getTheme());
+                captureTheme(ctx.getTheme());
+                pushObs();
+            });
             return () => {
                 listeners.delete(render);
                 unsubscribeTheme();
@@ -805,6 +832,10 @@ export default function activate(folium) {
     if (isMainContext) {
         void restore();
         disposers.push(folium.events.on('playback.songChanged', onSongChanged));
+        disposers.push(folium.events.on('theme.changed', (event) => {
+            captureTheme(event && event.theme);
+            pushObs();
+        }));
         pollTimer = setInterval(() => {
             void poll();
         }, 600);

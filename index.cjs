@@ -1270,6 +1270,7 @@ module.exports = function activate(api) {
         roomId: '',
         requests: [],
         current: null,
+        theme: null,
         pushedAt: 0,
     };
 
@@ -1295,7 +1296,7 @@ module.exports = function activate(api) {
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
   font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--text); }
-#root { position: fixed; inset: 0; }
+#root { position: fixed; inset: 0; z-index: 2; }
 #stageFrame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 1; }
 
 .panel { position: absolute; display: flex; flex-direction: column; overflow: hidden;
@@ -1305,7 +1306,7 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 
 /* ---------- 正在播放卡片 ---------- */
 #card { right: CARD_RIGHT_PLACEHOLDER; bottom: CARD_BOTTOM_PLACEHOLDER; width: CARD_WIDTH_PLACEHOLDER;
-  height: CARD_HEIGHT_PLACEHOLDER; padding: 14px; }
+  height: CARD_HEIGHT_PLACEHOLDER; padding: 14px; border-radius: 30px; }
 #card .inner { position: relative; display: flex; gap: 16px; height: 100%; align-items: center; }
 #card .cover-bg { position: absolute; inset: -20%; background-size: cover; background-position: center;
   opacity: .14; filter: blur(28px); }
@@ -1318,8 +1319,8 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
   letter-spacing: .18em; text-transform: uppercase; color: var(--accent); margin-bottom: 7px; }
 #card .disc { display: inline-block; animation: spin 5s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-#card .title { font-size: 23px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#card .sub { margin-top: 4px; font-size: 15px; color: var(--muted);
+#card .title { font-size: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#card .sub { margin-top: 4px; font-size: 16px; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #card .requester { display: inline-flex; align-items: center; gap: 6px; margin-top: 9px;
   font-size: 13px; color: var(--text); background: var(--accent-soft);
@@ -1412,6 +1413,7 @@ const cfg = {
   stageBase: 'http://127.0.0.1:' + (params.get('stagePort') || '__STAGE_PORT__'),
   token: params.get('token') || '__STAGE_TOKEN__',
   accent: params.get('accent') || '__ACCENT__',
+  accentProvided: params.get('accent') !== null,
   embedStageUrl: '__OBS_STAGE_URL__',
   embedStage: params.get('stage') === '1',
   listX: params.get('listX'), listY: params.get('listY'),
@@ -1460,9 +1462,41 @@ const fmt = (ms) => {
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 };
 
-// ---- 数据拉取：模组自己的 /state（请求队列+点歌人+播放态兜底）+ 宿主 Stage ----
-let modState = { connection: 'idle', requests: [], current: null };
+// ---- 数据拉取：模组自己的 /state（请求队列+点歌人+播放态兜底+主题）+ 宿主 Stage ----
+let modState = { connection: 'idle', requests: [], current: null, theme: null };
 let stageStatus = null;
+
+// 叠加层 UI 跟随 Folia 应用主题（派生公式与分支版队列展示层一致）。
+const hexToRgba = (hex, alpha) => {
+  if (typeof hex !== 'string' || hex.charAt(0) !== '#') return hex;
+  let body = hex.slice(1);
+  if (body.length === 3) body = body.split('').map((ch) => ch + ch).join('');
+  if (body.length !== 6) return hex;
+  const r = parseInt(body.slice(0, 2), 16);
+  const g = parseInt(body.slice(2, 4), 16);
+  const b = parseInt(body.slice(4, 6), 16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+};
+
+let appliedThemeJson = '';
+const applyTheme = () => {
+  const theme = modState.theme;
+  if (!theme) return;
+  const json = JSON.stringify(theme);
+  if (json === appliedThemeJson) return;
+  appliedThemeJson = json;
+  const daylight = theme.daylight === true;
+  const accent = cfg.accentProvided ? cfg.accent : (theme.accent || cfg.accent);
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty('--accent', accent);
+  rootStyle.setProperty('--accent-soft', hexToRgba(theme.accent || accent, daylight ? 0.14 : 0.2));
+  rootStyle.setProperty('--surface-strong', hexToRgba(theme.background || '#111218', daylight ? 0.9 : 0.82));
+  rootStyle.setProperty('--border', hexToRgba(theme.accent || accent, daylight ? 0.28 : 0.36));
+  rootStyle.setProperty('--text', theme.primary || '#f5f5f7');
+  rootStyle.setProperty('--muted', theme.secondary || '#b9bac4');
+  rootStyle.setProperty('--shadow', '0 24px 80px ' + hexToRgba(theme.background || '#000000', 0.42));
+  if (theme.fontStack) document.body.style.fontFamily = theme.fontStack;
+};
 
 const fetchJson = async (url, useAuth) => {
   try {
@@ -1475,6 +1509,7 @@ const fetchJson = async (url, useAuth) => {
 const pollMod = async () => {
   const data = await fetchJson('/state', false);
   if (data && Array.isArray(data.requests)) modState = data;
+  applyTheme();
 };
 const pollStage = async () => {
   const data = await fetchJson(cfg.stageBase + '/stage/player/status', true);
@@ -1700,6 +1735,7 @@ setInterval(() => { void tick(); }, 700);
                         roomId: obsState.roomId,
                         requests: obsState.requests,
                         current: obsState.current,
+                        theme: obsState.theme,
                         pushedAt: obsState.pushedAt,
                     }));
                     return;
@@ -1738,6 +1774,7 @@ setInterval(() => { void tick(); }, 700);
             if (typeof payload.roomId === 'string') obsState.roomId = payload.roomId;
             if (Array.isArray(payload.requests)) obsState.requests = payload.requests.slice(0, 100);
             obsState.current = payload.current === undefined ? obsState.current : (payload.current || null);
+            obsState.theme = payload.theme === undefined ? obsState.theme : (payload.theme || null);
             obsState.pushedAt = Date.now();
         }
         return { ok: true };
