@@ -48,9 +48,28 @@ export default function activate(folium) {
         }
         obsPushTimer = setTimeout(() => {
             obsPushTimer = null;
+            // 顺带推送宿主实时播放快照：舞台会话上下文里 Stage API 不报播放态，
+            // OBS 页面用它兜底渲染「正在播放」与进度。
+            let current = null;
+            try {
+                const playback = folium.playback.getState();
+                if (playback.song) {
+                    current = {
+                        id: playback.song.id,
+                        title: playback.song.title,
+                        artist: playback.song.artist,
+                        state: playback.state,
+                        position: playback.position,
+                        duration: playback.duration,
+                    };
+                }
+            } catch (_err) {
+                // 播放服务不可用时只推队列
+            }
             folium.rpc.call('pushObsState', {
                 connection: state.connection,
                 roomId: state.roomId,
+                current,
                 requests: state.requests.map((item) => ({
                     songId: item.songId,
                     title: item.title,
@@ -151,15 +170,22 @@ export default function activate(folium) {
 
     const removeRequest = async (item) => {
         state.requests = state.requests.filter((entry) => entry.id !== item.id);
+        let hostQueueEdited = false;
         try {
             const queueStatus = await folium.rpc.call('stage', { op: 'queueStatus' });
             const items = queueStatus?.data?.queue?.items || [];
             const match = items.find((entry) => Number(entry.id) === item.songId);
             if (match && match.queueItemId) {
-                await folium.rpc.call('stage', { op: 'queue', action: 'remove', queueItemId: match.queueItemId });
+                const result = await folium.rpc.call('stage', { op: 'queue', action: 'remove', queueItemId: match.queueItemId });
+                hostQueueEdited = Boolean(result && result.ok);
             }
         } catch (error) {
             folium.log.warn('remove request from queue failed:', error);
+        }
+        if (!hostQueueEdited) {
+            // 舞台会话上下文里宿主队列不可编辑，只能从点歌台移除；
+            // 歌曲仍会照常播放，到下一首自然跳过。
+            toast(L('宿主队列暂不可编辑（舞台会话），已仅在点歌台移除', 'Host queue is not editable right now; removed from the request list only'), 'info');
         }
         notify();
         persistSoon();
@@ -257,17 +283,20 @@ export default function activate(folium) {
 
         const seen = new Set([songId, ...remainingSongIds]);
         const appendIds = [...remainingSongIds, ...playlistTailIds.filter((id) => !seen.has(id))];
-        if (appendIds.length > 0) {
+        for (const appendId of appendIds) {
             try {
-                await folium.rpc.call('stage', { op: 'queue', action: 'append', songIds: appendIds });
+                await stageAppend(appendId);
             } catch (error) {
                 folium.log.warn('re-append pending requests failed:', error);
+                break;
             }
         }
     };
 
     const stageAppend = async (songId) => {
-        const result = await folium.rpc.call('stage', { op: 'queue', action: 'append', songIds: [songId] });
+        // /stage/player/queue 的 append 在舞台会话上下文会被 409 拒绝；
+        // play 端点的 appendToQueue 路径不做上下文检查，两种模式下都能入队。
+        const result = await folium.rpc.call('stage', { op: 'play', songId, appendToQueue: true });
         if (!result || !result.ok) {
             throw new Error(result?.error || 'Stage queue append failed');
         }
@@ -772,6 +801,7 @@ export default function activate(folium) {
     // ------------------------------------------------------------------
 
     let pollTimer = null;
+    let livePushTimer = null;
     if (isMainContext) {
         void restore();
         disposers.push(folium.events.on('playback.songChanged', onSongChanged));
@@ -781,6 +811,16 @@ export default function activate(folium) {
         // 确保 main 侧 OBS 页面服务在运行，并做一次初始推送。
         folium.rpc.call('obsStatus').catch(() => {});
         notify();
+        // 播放中每秒刷新一次 OBS 页面的进度兜底快照。
+        livePushTimer = setInterval(() => {
+            try {
+                if (folium.playback.getState().state === 'playing') {
+                    pushObs();
+                }
+            } catch (_err) {
+                // 播放服务不可用时跳过
+            }
+        }, 1000);
 
         const values = settingsSection.params.get();
         if (values.autoConnect && String(values.roomId || '').trim()) {
@@ -790,6 +830,7 @@ export default function activate(folium) {
 
     return () => {
         if (pollTimer) clearInterval(pollTimer);
+        if (livePushTimer) clearInterval(livePushTimer);
         if (persistTimer) clearTimeout(persistTimer);
         if (obsPushTimer) clearTimeout(obsPushTimer);
         disposers.forEach((dispose) => {

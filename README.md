@@ -61,7 +61,17 @@ B站连接与搜索全部发生在模组的 `main` 入口（主进程 Node 环�
 http://127.0.0.1:32198/
 ```
 
-页面复刻原分支版的队列列表 + 播放卡片：玻璃拟态面板、序号徽章、点歌人、进度条与自动滚动。URL 参数可覆盖布局：`accent`（主题色，如 `%236ee7ff`）、`speed`（滚动速度 5-120）、`mode`（`loop`/`ping-pong`）、`header=0`（隐藏列表标题）、`listX/listY/listWidth/listHeight`、`cardRight/cardBottom/cardWidth/cardHeight`、`lang=en`。
+页面复刻原分支版的队列列表 + 播放卡片：玻璃拟态面板、序号徽章、点歌人、进度条与自动滚动。
+
+**舞台动画**：加 `?stage=1` 可把宿主自己的 OBS 歌词页面（32108）以整页 iframe 嵌在本页面底层，一个浏览器源同时获得 歌词动画 + 队列 + 播放卡片：
+
+```
+http://127.0.0.1:32198/?stage=1
+```
+
+其余 URL 参数：`accent`（主题色，如 `%236ee7ff`）、`speed`（滚动速度 5-120）、`mode`（`loop`/`ping-pong`）、`header=0`（隐藏列表标题）、`listX/listY/listWidth/listHeight`、`cardRight/cardBottom/cardWidth/cardHeight`、`lang=en`。
+
+播放数据优先取宿主 Stage API；舞台会话上下文里 Stage 不报播放态时，自动回退到模组每秒推送的宿主播放快照（无封面，其余信息完整）。
 
 宿主自己的 OBS 页面（`127.0.0.1:32108`）不对模组开放，两者互相独立。
 

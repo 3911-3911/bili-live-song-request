@@ -1127,12 +1127,15 @@ const readStageConfig = () => {
         const raw = fs.readFileSync(configPath, 'utf8');
         const store = JSON.parse(raw);
         const port = Number(store.STAGE_API_PORT);
+        const obsPort = Number(store.OBS_BROWSER_SOURCE_PORT);
         return {
             ok: true,
             stageEnabled: store.STAGE_MODE_ENABLED === true && store.STAGE_MODE_SOURCE === 'stage-api',
             hasToken: typeof store.STAGE_API_TOKEN === 'string' && store.STAGE_API_TOKEN.length > 0,
             token: typeof store.STAGE_API_TOKEN === 'string' ? store.STAGE_API_TOKEN : '',
             port: Number.isInteger(port) && port > 0 ? port : 32107,
+            obsPort: Number.isInteger(obsPort) && obsPort > 0 ? obsPort : 32108,
+            obsToken: typeof store.OBS_BROWSER_SOURCE_TOKEN === 'string' ? store.OBS_BROWSER_SOURCE_TOKEN : '',
         };
     } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -1266,6 +1269,7 @@ module.exports = function activate(api) {
         connection: 'idle',
         roomId: '',
         requests: [],
+        current: null,
         pushedAt: 0,
     };
 
@@ -1292,8 +1296,10 @@ module.exports = function activate(api) {
 html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
   font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--text); }
 #root { position: fixed; inset: 0; }
+#stageFrame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 1; }
 
 .panel { position: absolute; display: flex; flex-direction: column; overflow: hidden;
+  z-index: 2;
   border-radius: 26px; border: 1px solid var(--border); background: var(--surface-strong);
   backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: var(--shadow); }
 
@@ -1406,6 +1412,8 @@ const cfg = {
   stageBase: 'http://127.0.0.1:' + (params.get('stagePort') || '__STAGE_PORT__'),
   token: params.get('token') || '__STAGE_TOKEN__',
   accent: params.get('accent') || '__ACCENT__',
+  embedStageUrl: '__OBS_STAGE_URL__',
+  embedStage: params.get('stage') === '1',
   listX: params.get('listX'), listY: params.get('listY'),
   listWidth: params.get('listWidth'), listHeight: params.get('listHeight'),
   cardRight: params.get('cardRight'), cardBottom: params.get('cardBottom'),
@@ -1415,6 +1423,12 @@ const cfg = {
   header: params.get('header') !== '0',
   lang: params.get('lang') === 'en' ? 'en' : 'zh-CN',
 };
+if (cfg.embedStage && cfg.embedStageUrl) {
+  const frame = document.createElement('iframe');
+  frame.id = 'stageFrame';
+  frame.src = cfg.embedStageUrl;
+  document.body.insertBefore(frame, document.body.firstChild);
+}
 const applyVar = (id, prop, value) => { if (value) document.getElementById(id).style.setProperty(prop, value); };
 document.documentElement.style.setProperty('--accent', cfg.accent);
 document.documentElement.style.setProperty('--accent-soft', cfg.accent + '33');
@@ -1446,8 +1460,8 @@ const fmt = (ms) => {
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 };
 
-// ---- 数据拉取：模组自己的 /state（请求队列+点歌人）+ 宿主 Stage（播放态+封面）----
-let modState = { connection: 'idle', requests: [] };
+// ---- 数据拉取：模组自己的 /state（请求队列+点歌人+播放态兜底）+ 宿主 Stage ----
+let modState = { connection: 'idle', requests: [], current: null };
 let stageStatus = null;
 
 const fetchJson = async (url, useAuth) => {
@@ -1546,10 +1560,9 @@ const renderList = (entries) => {
   el('listCount').textContent = entries.length > 0 ? T.count(entries.filter((e) => !e.isPlaying).length) : T.none;
 };
 
-const buildEntries = () => {
+const buildEntries = (current) => {
   refreshRequesterMap();
   const entries = [];
-  const current = stageStatus && stageStatus.current ? stageStatus.current : null;
   if (current) {
     entries.push({
       title: current.title, artist: current.artist, album: current.album,
@@ -1575,16 +1588,17 @@ const buildEntries = () => {
 };
 
 // ---- 进度条与滚动动画 ----
-let progressAnchor = { at: 0, positionMs: 0 };
+// 舞台会话上下文里 Stage API 不报播放态，进度信息回退到模组推送的宿主播放快照。
+let progressInfo = { positionMs: 0, durationMs: 0, playing: false, anchoredAt: 0 };
 const renderProgress = () => {
-  const duration = stageStatus && stageStatus.current && stageStatus.current.durationMs || 0;
-  if (!duration) { el('cardProgress').style.width = '0'; return; }
-  const extrapolated = stageStatus.playerState === 'PLAYING'
-    ? stageStatus.positionMs + (performance.now() - progressAnchor.at)
-    : stageStatus.positionMs;
-  const ratio = Math.min(1, Math.max(0, extrapolated / duration));
+  const info = progressInfo;
+  if (!info.durationMs) { el('cardProgress').style.width = '0'; return; }
+  const extrapolated = info.playing
+    ? info.positionMs + (performance.now() - info.anchoredAt)
+    : info.positionMs;
+  const ratio = Math.min(1, Math.max(0, extrapolated / info.durationMs));
   el('cardProgress').style.width = (ratio * 100).toFixed(2) + '%';
-  el('cardTimeNow').textContent = fmt(Math.min(extrapolated, duration));
+  el('cardTimeNow').textContent = fmt(Math.min(extrapolated, info.durationMs));
 };
 
 let scrollOffset = 0;
@@ -1619,12 +1633,29 @@ requestAnimationFrame(frame);
 // ---- 轮询循环 ----
 const tick = async () => {
   await Promise.all([pollMod(), pollStage()]);
-  const current = stageStatus && stageStatus.current ? stageStatus.current : null;
-  renderCard(current, stageStatus && stageStatus.playerState === 'PLAYING');
-  if (stageStatus && stageStatus.sampledAtMs) {
-    progressAnchor = { at: performance.now(), positionMs: stageStatus.positionMs || 0 };
-  }
-  renderList(buildEntries());
+  const stageCurrent = stageStatus && stageStatus.current ? stageStatus.current : null;
+  const fallback = modState.current && modState.current.title ? modState.current : null;
+  const current = stageCurrent || (fallback ? {
+    title: fallback.title,
+    artist: fallback.artist,
+    album: '',
+    coverUrl: '',
+    id: fallback.id,
+    durationMs: fallback.duration ? Math.floor(fallback.duration * 1000) : 0,
+  } : null);
+  const playing = stageCurrent
+    ? stageStatus.playerState === 'PLAYING'
+    : Boolean(fallback && fallback.state === 'playing');
+  renderCard(current, playing);
+  progressInfo = {
+    positionMs: stageCurrent
+      ? (stageStatus.positionMs || 0)
+      : Math.floor(((fallback && fallback.position) || 0) * 1000),
+    durationMs: current ? current.durationMs || 0 : 0,
+    playing,
+    anchoredAt: performance.now(),
+  };
+  renderList(buildEntries(current));
 };
 void tick();
 setInterval(() => { void tick(); }, 700);
@@ -1634,6 +1665,10 @@ setInterval(() => { void tick(); }, 700);
 
     const renderObsPage = () => {
         const accent = '#6ee7ff';
+        const config = readStageConfig();
+        const obsStageUrl = config.obsToken
+            ? `http://127.0.0.1:${config.obsPort}/obs?obs=1&token=${encodeURIComponent(config.obsToken)}`
+            : '';
         return OBS_PAGE_HTML
             .replace(/ACCENT_SOFT_PLACEHOLDER/, accent + '33')
             .replace(/ACCENT_PLACEHOLDER/, accent)
@@ -1646,8 +1681,9 @@ setInterval(() => { void tick(); }, 700);
             .replace(/LIST_TOP_PLACEHOLDER/, '12%')
             .replace(/LIST_WIDTH_PLACEHOLDER/, '432px')
             .replace(/LIST_HEIGHT_PLACEHOLDER/, 'min(560px, calc(100vh - 14vh))')
-            .replace(/__STAGE_PORT__/, String(readStageConfig().port || 32107))
-            .replace(/__STAGE_TOKEN__/, readStageConfig().token || '');
+            .replace(/__STAGE_PORT__/, String(config.port || 32107))
+            .replace(/__STAGE_TOKEN__/, config.token || '')
+            .replace(/__OBS_STAGE_URL__/, obsStageUrl);
     };
 
     const startObsServer = async () => {
@@ -1663,6 +1699,7 @@ setInterval(() => { void tick(); }, 700);
                         connection: obsState.connection,
                         roomId: obsState.roomId,
                         requests: obsState.requests,
+                        current: obsState.current,
                         pushedAt: obsState.pushedAt,
                     }));
                     return;
@@ -1700,6 +1737,7 @@ setInterval(() => { void tick(); }, 700);
             if (typeof payload.connection === 'string') obsState.connection = payload.connection;
             if (typeof payload.roomId === 'string') obsState.roomId = payload.roomId;
             if (Array.isArray(payload.requests)) obsState.requests = payload.requests.slice(0, 100);
+            obsState.current = payload.current === undefined ? obsState.current : (payload.current || null);
             obsState.pushedAt = Date.now();
         }
         return { ok: true };
