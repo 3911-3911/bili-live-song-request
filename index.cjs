@@ -1354,6 +1354,10 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
   padding: 10px 12px; background: var(--surface-strong); flex: none;
   backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
 .row.emphasized { border-color: var(--accent); }
+.preview-divider { font-size: 12px; font-weight: 600; letter-spacing: .12em; color: var(--muted);
+  padding: 10px 4px 2px; text-shadow: 0 2px 12px rgba(0,0,0,.7); }
+.row.preview { opacity: .6; }
+.row.preview .num { background: transparent; border: 1px solid var(--border); color: var(--muted); }
 .row .num { width: 36px; height: 36px; flex: none; display: grid; place-items: center;
   border-radius: 12px; background: var(--accent-soft); color: var(--accent);
   font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -1497,12 +1501,12 @@ const T = {
   'zh-CN': {
     nowPlaying: '正在播放', idle: '等待点歌…', queueTitle: '点歌队列',
     none: '暂无点歌', playingBadge: '播放中', empty: '队列空闲，发送「点歌 歌名」点歌',
-    count: (n) => '待播 ' + n + ' 首',
+    count: (n) => '待播 ' + n + ' 首', upNext: '接下来',
   },
   en: {
     nowPlaying: 'NOW PLAYING', idle: 'Waiting for requests…', queueTitle: 'Song Requests',
     none: 'No requests yet', playingBadge: 'Playing', empty: 'Queue is empty — send "song <title>"',
-    count: (n) => n + ' pending',
+    count: (n) => n + ' pending', upNext: 'Up next',
   },
 };
 const applyLang = (lang) => {
@@ -1610,17 +1614,17 @@ const renderCard = (current, playing) => {
 };
 
 const renderList = (entries) => {
-  const json = JSON.stringify(entries);
+  const json = JSON.stringify(entries) + '#' + JSON.stringify(upcoming);
   if (json === lastEntriesJson) return;
   lastEntriesJson = json;
   const track = el('track');
   track.textContent = '';
   for (const entry of entries) {
     const row = document.createElement('div');
-    row.className = 'row' + (entry.isPlaying ? ' emphasized' : '');
+    row.className = 'row';
     const num = document.createElement('div');
     num.className = 'num';
-    num.textContent = entry.isPlaying ? '\\u25B6' : String(entry.position);
+    num.textContent = String(entry.position);
     const info = document.createElement('div');
     info.className = 'info';
     const title = document.createElement('div');
@@ -1629,12 +1633,6 @@ const renderList = (entries) => {
     name.className = 'name';
     name.textContent = entry.title;
     title.appendChild(name);
-    if (entry.isPlaying) {
-      const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = TT().playingBadge;
-      title.appendChild(badge);
-    }
     const sub = document.createElement('div');
     sub.className = 'sub';
     const artist = document.createElement('span');
@@ -1654,36 +1652,82 @@ const renderList = (entries) => {
     row.appendChild(info);
     track.appendChild(row);
   }
+  // 空闲（无待播点歌）时：预告宿主歌单接下来两首（弱化样式，无序号无点歌人）。
+  if (entries.length === 0 && upcoming.length > 0) {
+    const divider = document.createElement('div');
+    divider.className = 'preview-divider';
+    divider.textContent = TT().upNext;
+    track.appendChild(divider);
+    for (const item of upcoming) {
+      const row = document.createElement('div');
+      row.className = 'row preview';
+      const num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = '\\u266A';
+      const info = document.createElement('div');
+      info.className = 'info';
+      const title = document.createElement('div');
+      title.className = 'title';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = item.title;
+      title.appendChild(name);
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      const artist = document.createElement('span');
+      artist.className = 'artist';
+      artist.textContent = item.artist || '';
+      sub.appendChild(artist);
+      info.appendChild(title);
+      info.appendChild(sub);
+      row.appendChild(num);
+      row.appendChild(info);
+      track.appendChild(row);
+    }
+  }
   el('emptyRow').textContent = TT().empty;
-  el('emptyRow').classList.toggle('hidden', entries.length > 0);
-  el('listCount').textContent = entries.length > 0 ? TT().count(entries.filter((e) => !e.isPlaying).length) : TT().none;
+  el('emptyRow').classList.toggle('hidden', entries.length > 0 || upcoming.length > 0);
+  el('listCount').textContent = entries.length > 0 ? TT().count(entries.length) : TT().none;
 };
 
-const buildEntries = (current) => {
+// 队列列表只显示待播点歌（正在播放交给卡片）。
+const buildEntries = () => {
   refreshRequesterMap();
   const entries = [];
-  if (current) {
-    entries.push({
-      title: current.title, artist: current.artist, album: current.album,
-      requester: requesterBySong.get(Number(current.id)) || '', isPlaying: true, position: 0,
-    });
-  }
   for (const item of (modState.requests || [])) {
-    if (current && Number(current.id) === Number(item.songId)) continue;
     if (item.status === 'playing') continue;
     entries.push({
       title: item.title, artist: item.artist, requester: item.uname || '',
-      isPlaying: false, position: entries.length,
+      isPlaying: false, position: entries.length + 1,
     });
   }
-  // position 重新按展示顺序编号（正在播放不占号）
-  let number = 1;
-  for (const entry of entries) {
-    if (entry.isPlaying) continue;
-    entry.position = number;
-    number += 1;
-  }
   return entries;
+};
+
+// 无点歌时预告宿主歌单的接下来两首（节流 5s，仅空闲时查询）。
+let upcoming = [];
+let upcomingFetchedAt = 0;
+let upcomingFetchBusy = false;
+const pollUpcoming = async (force) => {
+  if (upcomingFetchBusy) return;
+  if (!force && performance.now() - upcomingFetchedAt < 5000) return;
+  upcomingFetchBusy = true;
+  try {
+    const head = await fetchJson(cfg.stageBase + '/stage/player/queue?limit=1', true);
+    const currentIndex = Number(head && head.queue && head.queue.currentIndex);
+    if (!Number.isInteger(currentIndex) || currentIndex < 0) {
+      upcoming = [];
+      return;
+    }
+    const windowed = await fetchJson(cfg.stageBase + '/stage/player/queue?offset=' + (currentIndex + 1) + '&limit=2', true);
+    const items = (windowed && windowed.queue && windowed.queue.items) || [];
+    upcoming = items.slice(0, 2).map((item) => ({ title: item.title, artist: item.artist }));
+  } catch (_err) {
+    upcoming = [];
+  } finally {
+    upcomingFetchedAt = performance.now();
+    upcomingFetchBusy = false;
+  }
 };
 
 // ---- 进度条与滚动动画 ----
@@ -1757,7 +1801,10 @@ const tick = async () => {
     playing,
     anchoredAt: performance.now(),
   };
-  renderList(buildEntries(current));
+  renderList(buildEntries());
+  if (!modState.requests || modState.requests.every((item) => item.status === 'playing')) {
+    void pollUpcoming(false);
+  }
 };
 void tick();
 setInterval(() => { void tick(); }, 700);
