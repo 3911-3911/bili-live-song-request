@@ -36,6 +36,40 @@ export default function activate(folium) {
     };
 
     const listeners = new Set();
+
+    // 把请求队列与连接状态推给 main 的 OBS 页面服务（节流）。
+    let obsPushTimer = null;
+    let obsPushQueued = false;
+    const pushObs = () => {
+        if (!isMainContext) return;
+        if (obsPushTimer) {
+            obsPushQueued = true;
+            return;
+        }
+        obsPushTimer = setTimeout(() => {
+            obsPushTimer = null;
+            folium.rpc.call('pushObsState', {
+                connection: state.connection,
+                roomId: state.roomId,
+                requests: state.requests.map((item) => ({
+                    songId: item.songId,
+                    title: item.title,
+                    artist: item.artist,
+                    uname: item.uname,
+                    status: item.status,
+                    ts: item.ts,
+                })),
+            }).then(() => {
+                if (obsPushQueued) {
+                    obsPushQueued = false;
+                    pushObs();
+                }
+            }).catch(() => {
+                // main 侧不可用（停用中）时静默
+            });
+        }, 400);
+    };
+
     const notify = () => {
         listeners.forEach((listener) => {
             try {
@@ -44,6 +78,7 @@ export default function activate(folium) {
                 // 单个面板渲染失败不影响其他订阅者
             }
         });
+        pushObs();
     };
 
     const dedupeMap = new Map();     // keyword -> last accepted ts
@@ -195,14 +230,36 @@ export default function activate(folium) {
     };
 
     const stagePlayNow = async (songId, remainingSongIds) => {
+        // 立即播放会把宿主队列整体替换为这一首；播放前先快照原队列，
+        // 播放后把「其余点歌 + 原歌单未播部分」按分支版的顺序接回队尾，
+        // 否则点播结束后回不到原来的歌单。
+        let playlistTailIds = [];
+        try {
+            const playerStatus = await folium.rpc.call('stage', { op: 'playerStatus' });
+            const currentQueueItemId = playerStatus?.data?.current?.queueItemId || null;
+            const queueStatus = await folium.rpc.call('stage', { op: 'queueStatus' });
+            const items = queueStatus?.data?.queue?.items || [];
+            const currentIndex = currentQueueItemId
+                ? items.findIndex((entry) => entry.queueItemId === currentQueueItemId)
+                : -1;
+            playlistTailIds = items
+                .slice(currentIndex + 1)
+                .map((entry) => Number(entry.id))
+                .filter((id) => Number.isInteger(id) && id > 0);
+        } catch (_err) {
+            // 快照失败不阻断播放，只是丢了原歌单的接回
+        }
+
         const result = await folium.rpc.call('stage', { op: 'play', songId, appendToQueue: false });
         if (!result || !result.ok) {
             throw new Error(result?.error || 'Stage play failed');
         }
-        // 立即播放会把队列替换为这一首；把其余待播请求重新接回队尾。
-        if (remainingSongIds.length > 0) {
+
+        const seen = new Set([songId, ...remainingSongIds]);
+        const appendIds = [...remainingSongIds, ...playlistTailIds.filter((id) => !seen.has(id))];
+        if (appendIds.length > 0) {
             try {
-                await folium.rpc.call('stage', { op: 'queue', action: 'append', songIds: remainingSongIds });
+                await folium.rpc.call('stage', { op: 'queue', action: 'append', songIds: appendIds });
             } catch (error) {
                 folium.log.warn('re-append pending requests failed:', error);
             }
@@ -617,7 +674,10 @@ export default function activate(folium) {
                 list.textContent = '';
                 const playing = state.requests.filter((item) => item.status === 'playing');
                 const queued = state.requests.filter((item) => item.status !== 'playing');
-                const rows = [...playing, ...queued.map((item, index) => ({ item, number: index + 1 }))];
+                const rows = [
+                    ...playing.map((item) => ({ item, number: null })),
+                    ...queued.map((item, index) => ({ item, number: index + 1 })),
+                ];
 
                 if (rows.length === 0) {
                     const empty = document.createElement('div');
@@ -718,6 +778,9 @@ export default function activate(folium) {
         pollTimer = setInterval(() => {
             void poll();
         }, 600);
+        // 确保 main 侧 OBS 页面服务在运行，并做一次初始推送。
+        folium.rpc.call('obsStatus').catch(() => {});
+        notify();
 
         const values = settingsSection.params.get();
         if (values.autoConnect && String(values.roomId || '').trim()) {
@@ -728,6 +791,7 @@ export default function activate(folium) {
     return () => {
         if (pollTimer) clearInterval(pollTimer);
         if (persistTimer) clearTimeout(persistTimer);
+        if (obsPushTimer) clearTimeout(obsPushTimer);
         disposers.forEach((dispose) => {
             try {
                 dispose();

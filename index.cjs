@@ -1206,6 +1206,8 @@ const handleStageOp = async (op) => {
             });
         case 'queueStatus':
             return stageRequest('GET', '/stage/player/queue?limit=200');
+        case 'playerStatus':
+            return stageRequest('GET', '/stage/player/status');
         default:
             return { ok: false, error: `Unknown stage op: ${op && op.op}` };
     }
@@ -1254,8 +1256,465 @@ module.exports = function activate(api) {
 
     api.rpc.handle('stageConfig', async () => readStageConfig());
 
+    // ------------------------------------------------------------------
+    // OBS 展示页：模组自己的本地页面服务（宿主的 OBS 页面 32108 不对模组
+    // 开放，这里复刻分支版队列列表 + 播放卡片，数据来自 client 推送的
+    // 请求队列与宿主 Stage API 的播放状态/队列）。
+    // ------------------------------------------------------------------
+
+    const obsState = {
+        connection: 'idle',
+        roomId: '',
+        requests: [],
+        pushedAt: 0,
+    };
+
+    let obsServer = null;
+    let obsServerPort = 0;
+
+    const OBS_PAGE_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Folia 点歌台</title>
+<style>
+:root {
+  --accent: ACCENT_PLACEHOLDER;
+  --accent-soft: ACCENT_SOFT_PLACEHOLDER;
+  --surface-strong: rgba(17, 18, 24, 0.82);
+  --border: rgba(255, 255, 255, 0.15);
+  --text: #f5f5f7;
+  --muted: #b9bac4;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
+  font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--text); }
+#root { position: fixed; inset: 0; }
+
+.panel { position: absolute; display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 26px; border: 1px solid var(--border); background: var(--surface-strong);
+  backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: var(--shadow); }
+
+/* ---------- 正在播放卡片 ---------- */
+#card { right: CARD_RIGHT_PLACEHOLDER; bottom: CARD_BOTTOM_PLACEHOLDER; width: CARD_WIDTH_PLACEHOLDER;
+  height: CARD_HEIGHT_PLACEHOLDER; padding: 14px; }
+#card .inner { position: relative; display: flex; gap: 16px; height: 100%; align-items: center; }
+#card .cover-bg { position: absolute; inset: -20%; background-size: cover; background-position: center;
+  opacity: .14; filter: blur(28px); }
+#card .cover { position: relative; width: COVER_SIZE_PLACEHOLDER; height: COVER_SIZE_PLACEHOLDER; flex: none;
+  border-radius: 18px; border: 1px solid var(--border); background: var(--accent-soft);
+  object-fit: cover; }
+#card .cover-placeholder { display: grid; place-items: center; font-size: 30px; color: var(--accent); }
+#card .meta { position: relative; min-width: 0; flex: 1; }
+#card .label { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--accent); margin-bottom: 7px; }
+#card .disc { display: inline-block; animation: spin 5s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#card .title { font-size: 23px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#card .sub { margin-top: 4px; font-size: 15px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#card .requester { display: inline-flex; align-items: center; gap: 6px; margin-top: 9px;
+  font-size: 13px; color: var(--text); background: var(--accent-soft);
+  border-radius: 999px; padding: 3px 11px; max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#card .requester svg { flex: none; }
+#card .progress { margin-top: 11px; height: 4px; border-radius: 999px; background: rgba(255,255,255,.14);
+  overflow: hidden; }
+#card .progress > div { height: 100%; width: 0; border-radius: 999px; background: var(--accent); }
+#card .time { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted);
+  margin-top: 5px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 队列列表 ---------- */
+#list { left: LIST_LEFT_PLACEHOLDER; top: LIST_TOP_PLACEHOLDER; width: LIST_WIDTH_PLACEHOLDER;
+  max-height: LIST_HEIGHT_PLACEHOLDER; }
+#list header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 14px 10px; flex: none; }
+#list header .heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#list header .icon-box { width: 36px; height: 36px; flex: none; display: grid; place-items: center;
+  border-radius: 14px; background: var(--accent-soft); }
+#list header h2 { font-size: 16px; font-weight: 600; letter-spacing: .08em; }
+#list header p { font-size: 13px; color: var(--muted); margin-top: 1px; }
+#list header .live { width: 9px; height: 9px; border-radius: 999px; background: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite; flex: none; }
+@keyframes pulse { 50% { opacity: .35; } }
+#list .viewport { overflow: hidden; flex: 1; min-height: 0; position: relative; }
+#list .track { display: flex; flex-direction: column; gap: 10px; padding: 0 14px 14px; will-change: transform; }
+.row { display: flex; align-items: center; gap: 12px; border-radius: 20px; border: 1px solid var(--border);
+  padding: 10px 12px; background: rgba(255, 255, 255, 0.03); flex: none; }
+.row.emphasized { border-color: var(--accent); }
+.row .num { width: 36px; height: 36px; flex: none; display: grid; place-items: center;
+  border-radius: 12px; background: var(--accent-soft); color: var(--accent);
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.row .info { min-width: 0; flex: 1; }
+.row .title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px;
+  white-space: nowrap; overflow: hidden; }
+.row .title span.name { overflow: hidden; text-overflow: ellipsis; }
+.row .badge { flex: none; font-size: 11px; font-weight: 600; letter-spacing: .05em; color: var(--accent);
+  background: var(--accent-soft); border-radius: 999px; padding: 2px 9px; }
+.row .sub { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 4px; font-size: 13px; color: var(--muted); }
+.row .sub .artist { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .sub .by { flex: none; display: inline-flex; align-items: center; gap: 5px; max-width: 46%;
+  color: var(--text); background: var(--accent-soft); border-radius: 999px; padding: 2px 10px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.empty { padding: 10px 16px 18px; font-size: 14px; color: var(--muted); }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="root">
+  <section id="card" class="panel">
+    <div class="inner">
+      <div class="cover-bg" id="cardBg"></div>
+      <img class="cover" id="cardCover" alt="" crossorigin="anonymous">
+      <div class="cover cover-placeholder hidden" id="cardPlaceholder">&#9835;</div>
+      <div class="meta">
+        <div class="label"><span class="disc">&#10227;</span><span id="cardLabel">正在播放</span></div>
+        <div class="title" id="cardTitle">等待点歌…</div>
+        <div class="sub" id="cardSub"></div>
+        <div class="requester hidden" id="cardRequester"></div>
+        <div class="progress"><div id="cardProgress"></div></div>
+        <div class="time"><span id="cardTimeNow">0:00</span><span id="cardTimeTotal">0:00</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="list" class="panel">
+    <header id="listHeader">
+      <div class="heading">
+        <div class="icon-box">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="3" y1="6" y2="6"/><line x1="21" x2="3" y1="12" y2="12"/><line x1="21" x2="3" y1="18" y2="18"/><line x1="8" x2="8" y1="6" y2="18"/><line x1="14" x2="14" y1="6" y2="18"/></svg>
+        </div>
+        <div>
+          <h2 id="listTitle">点歌队列</h2>
+          <p id="listCount">暂无点歌</p>
+        </div>
+      </div>
+      <span class="live"></span>
+    </header>
+    <div class="viewport"><div class="track" id="track"></div></div>
+    <div class="empty hidden" id="emptyRow">队列空闲，发送「点歌 歌名」点歌</div>
+  </section>
+</div>
+<script>
+'use strict';
+// ---- 配置：URL 参数覆盖默认布局 ----
+const params = new URLSearchParams(location.search);
+const cfg = {
+  stageBase: 'http://127.0.0.1:' + (params.get('stagePort') || '__STAGE_PORT__'),
+  token: params.get('token') || '__STAGE_TOKEN__',
+  accent: params.get('accent') || '__ACCENT__',
+  listX: params.get('listX'), listY: params.get('listY'),
+  listWidth: params.get('listWidth'), listHeight: params.get('listHeight'),
+  cardRight: params.get('cardRight'), cardBottom: params.get('cardBottom'),
+  cardWidth: params.get('cardWidth'), cardHeight: params.get('cardHeight'),
+  speed: Math.min(120, Math.max(5, Number(params.get('speed')) || 18)),
+  mode: params.get('mode') === 'ping-pong' ? 'ping-pong' : 'loop',
+  header: params.get('header') !== '0',
+  lang: params.get('lang') === 'en' ? 'en' : 'zh-CN',
+};
+const applyVar = (id, prop, value) => { if (value) document.getElementById(id).style.setProperty(prop, value); };
+document.documentElement.style.setProperty('--accent', cfg.accent);
+document.documentElement.style.setProperty('--accent-soft', cfg.accent + '33');
+applyVar('list', 'left', cfg.listX ? cfg.listX + '%' : null);
+applyVar('list', 'top', cfg.listY ? cfg.listY + '%' : null);
+applyVar('list', 'width', cfg.listWidth ? cfg.listWidth + 'px' : null);
+applyVar('list', 'max-height', cfg.listHeight ? cfg.listHeight + 'px' : null);
+applyVar('card', 'right', cfg.cardRight ? cfg.cardRight + '%' : null);
+applyVar('card', 'bottom', cfg.cardBottom ? cfg.cardBottom + '%' : null);
+applyVar('card', 'width', cfg.cardWidth ? cfg.cardWidth + 'px' : null);
+applyVar('card', 'height', cfg.cardHeight ? cfg.cardHeight + 'px' : null);
+if (!cfg.header) document.getElementById('listHeader').classList.add('hidden');
+
+const T = cfg.lang === 'en' ? {
+  nowPlaying: 'NOW PLAYING', idle: 'Waiting for requests…', queueTitle: 'Song Requests',
+  none: 'No requests yet', playingBadge: 'Playing', empty: 'Queue is empty — send "song <title>"',
+  count: (n) => n + ' pending', by: (n) => n,
+} : {
+  nowPlaying: '正在播放', idle: '等待点歌…', queueTitle: '点歌队列',
+  none: '暂无点歌', playingBadge: '播放中', empty: '队列空闲，发送「点歌 歌名」点歌',
+  count: (n) => '待播 ' + n + ' 首', by: (n) => n,
+};
+document.getElementById('cardLabel').textContent = T.nowPlaying;
+document.getElementById('cardTitle').textContent = T.idle;
+document.getElementById('listTitle').textContent = T.queueTitle;
+
+const fmt = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+};
+
+// ---- 数据拉取：模组自己的 /state（请求队列+点歌人）+ 宿主 Stage（播放态+封面）----
+let modState = { connection: 'idle', requests: [] };
+let stageStatus = null;
+
+const fetchJson = async (url, useAuth) => {
+  try {
+    const res = await fetch(url, useAuth ? { headers: { Authorization: 'Bearer ' + cfg.token } } : {});
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_err) { return null; }
+};
+
+const pollMod = async () => {
+  const data = await fetchJson('/state', false);
+  if (data && Array.isArray(data.requests)) modState = data;
+};
+const pollStage = async () => {
+  const data = await fetchJson(cfg.stageBase + '/stage/player/status', true);
+  if (data && data.current !== undefined) stageStatus = data;
+};
+
+const requesterBySong = new Map();
+const refreshRequesterMap = () => {
+  requesterBySong.clear();
+  for (const item of modState.requests || []) {
+    requesterBySong.set(Number(item.songId), item.uname || '');
+  }
+};
+
+// ---- 渲染 ----
+const el = (id) => document.getElementById(id);
+const userIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+
+let lastEntriesJson = '';
+const renderCard = (current, playing) => {
+  const cover = current && current.coverUrl ? current.coverUrl : '';
+  el('cardBg').style.backgroundImage = cover ? 'url("' + cover + '")' : 'none';
+  el('cardCover').src = cover;
+  el('cardCover').classList.toggle('hidden', !cover);
+  el('cardPlaceholder').classList.toggle('hidden', Boolean(cover));
+  el('cardTitle').textContent = current ? current.title : T.idle;
+  const sub = current ? [current.artist, current.album].filter(Boolean).join(' · ') : '';
+  el('cardSub').textContent = sub;
+  const requester = current ? requesterBySong.get(Number(current.id)) : null;
+  el('cardRequester').classList.toggle('hidden', !requester);
+  if (requester) el('cardRequester').innerHTML = userIcon + '<span>' + requester + '</span>';
+  const duration = current && current.durationMs ? current.durationMs : 0;
+  el('cardTimeTotal').textContent = duration ? fmt(duration) : '0:00';
+  el('cardLabel').parentElement.style.opacity = playing ? '1' : '.55';
+};
+
+const renderList = (entries) => {
+  const json = JSON.stringify(entries);
+  if (json === lastEntriesJson) return;
+  lastEntriesJson = json;
+  const track = el('track');
+  track.textContent = '';
+  for (const entry of entries) {
+    const row = document.createElement('div');
+    row.className = 'row' + (entry.isPlaying ? ' emphasized' : '');
+    const num = document.createElement('div');
+    num.className = 'num';
+    num.textContent = entry.isPlaying ? '\\u25B6' : String(entry.position);
+    const info = document.createElement('div');
+    info.className = 'info';
+    const title = document.createElement('div');
+    title.className = 'title';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = entry.title;
+    title.appendChild(name);
+    if (entry.isPlaying) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = T.playingBadge;
+      title.appendChild(badge);
+    }
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    const artist = document.createElement('span');
+    artist.className = 'artist';
+    artist.textContent = entry.artist || entry.album || '';
+    sub.appendChild(artist);
+    if (entry.requester) {
+      const by = document.createElement('span');
+      by.className = 'by';
+      by.innerHTML = userIcon + '<span></span>';
+      by.lastElementChild.textContent = entry.requester;
+      sub.appendChild(by);
+    }
+    info.appendChild(title);
+    info.appendChild(sub);
+    row.appendChild(num);
+    row.appendChild(info);
+    track.appendChild(row);
+  }
+  el('emptyRow').classList.toggle('hidden', entries.length > 0);
+  el('listCount').textContent = entries.length > 0 ? T.count(entries.filter((e) => !e.isPlaying).length) : T.none;
+};
+
+const buildEntries = () => {
+  refreshRequesterMap();
+  const entries = [];
+  const current = stageStatus && stageStatus.current ? stageStatus.current : null;
+  if (current) {
+    entries.push({
+      title: current.title, artist: current.artist, album: current.album,
+      requester: requesterBySong.get(Number(current.id)) || '', isPlaying: true, position: 0,
+    });
+  }
+  for (const item of (modState.requests || [])) {
+    if (current && Number(current.id) === Number(item.songId)) continue;
+    if (item.status === 'playing') continue;
+    entries.push({
+      title: item.title, artist: item.artist, requester: item.uname || '',
+      isPlaying: false, position: entries.length,
+    });
+  }
+  // position 重新按展示顺序编号（正在播放不占号）
+  let number = 1;
+  for (const entry of entries) {
+    if (entry.isPlaying) continue;
+    entry.position = number;
+    number += 1;
+  }
+  return entries;
+};
+
+// ---- 进度条与滚动动画 ----
+let progressAnchor = { at: 0, positionMs: 0 };
+const renderProgress = () => {
+  const duration = stageStatus && stageStatus.current && stageStatus.current.durationMs || 0;
+  if (!duration) { el('cardProgress').style.width = '0'; return; }
+  const extrapolated = stageStatus.playerState === 'PLAYING'
+    ? stageStatus.positionMs + (performance.now() - progressAnchor.at)
+    : stageStatus.positionMs;
+  const ratio = Math.min(1, Math.max(0, extrapolated / duration));
+  el('cardProgress').style.width = (ratio * 100).toFixed(2) + '%';
+  el('cardTimeNow').textContent = fmt(Math.min(extrapolated, duration));
+};
+
+let scrollOffset = 0;
+let scrollDirection = 1;
+const stepScroll = (deltaMs) => {
+  const viewport = document.querySelector('#list .viewport');
+  const track = el('track');
+  if (!viewport || !track || track.children.length < 2) return;
+  const overflow = track.scrollHeight - viewport.clientHeight;
+  if (overflow <= 4) { track.style.transform = 'translateY(0)'; return; }
+  scrollOffset += (deltaMs / 1000) * cfg.speed * scrollDirection;
+  if (cfg.mode === 'loop') {
+    if (scrollOffset >= overflow + 12) scrollOffset = -12;
+    if (scrollOffset < -12) scrollOffset = overflow + 12;
+  } else {
+    if (scrollOffset >= overflow) { scrollOffset = overflow; scrollDirection = -1; }
+    if (scrollOffset <= 0) { scrollOffset = 0; scrollDirection = 1; }
+  }
+  track.style.transform = 'translateY(' + (-Math.max(0, scrollOffset)) + 'px)';
+};
+
+let lastFrame = performance.now();
+const frame = (now) => {
+  const delta = now - lastFrame;
+  lastFrame = now;
+  renderProgress();
+  stepScroll(delta);
+  requestAnimationFrame(frame);
+};
+requestAnimationFrame(frame);
+
+// ---- 轮询循环 ----
+const tick = async () => {
+  await Promise.all([pollMod(), pollStage()]);
+  const current = stageStatus && stageStatus.current ? stageStatus.current : null;
+  renderCard(current, stageStatus && stageStatus.playerState === 'PLAYING');
+  if (stageStatus && stageStatus.sampledAtMs) {
+    progressAnchor = { at: performance.now(), positionMs: stageStatus.positionMs || 0 };
+  }
+  renderList(buildEntries());
+};
+void tick();
+setInterval(() => { void tick(); }, 700);
+</script>
+</body>
+</html>`;
+
+    const renderObsPage = () => {
+        const accent = '#6ee7ff';
+        return OBS_PAGE_HTML
+            .replace(/ACCENT_SOFT_PLACEHOLDER/, accent + '33')
+            .replace(/ACCENT_PLACEHOLDER/, accent)
+            .replace(/CARD_RIGHT_PLACEHOLDER/, '2%')
+            .replace(/CARD_BOTTOM_PLACEHOLDER/, '3%')
+            .replace(/CARD_WIDTH_PLACEHOLDER/, '608px')
+            .replace(/CARD_HEIGHT_PLACEHOLDER/, '168px')
+            .replace(/COVER_SIZE_PLACEHOLDER/, '96px')
+            .replace(/LIST_LEFT_PLACEHOLDER/, '2%')
+            .replace(/LIST_TOP_PLACEHOLDER/, '12%')
+            .replace(/LIST_WIDTH_PLACEHOLDER/, '432px')
+            .replace(/LIST_HEIGHT_PLACEHOLDER/, 'min(560px, calc(100vh - 14vh))')
+            .replace(/__STAGE_PORT__/, String(readStageConfig().port || 32107))
+            .replace(/__STAGE_TOKEN__/, readStageConfig().token || '');
+    };
+
+    const startObsServer = async () => {
+        if (obsServer) return { ok: true, port: obsServerPort };
+        const config = readStageConfig();
+        const requestedPort = Number(process.env.FOLIA_BILI_OBS_PORT) || 32198;
+        await new Promise((resolve) => {
+            obsServer = http.createServer((req, res) => {
+                const pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname;
+                if (pathname === '/state') {
+                    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                    res.end(JSON.stringify({
+                        connection: obsState.connection,
+                        roomId: obsState.roomId,
+                        requests: obsState.requests,
+                        pushedAt: obsState.pushedAt,
+                    }));
+                    return;
+                }
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(renderObsPage());
+            });
+            obsServer.on('error', (error) => {
+                log('obs server error:', error.message);
+                obsServer = null;
+                resolve();
+            });
+            obsServer.listen(requestedPort, '127.0.0.1', () => {
+                obsServerPort = requestedPort;
+                log('obs page serving at http://127.0.0.1:' + requestedPort + '/');
+                resolve();
+            });
+        });
+        return { ok: Boolean(obsServer), port: obsServerPort, stageEnabled: config.stageEnabled };
+    };
+
+    const stopObsServer = () => {
+        if (!obsServer) return;
+        try {
+            obsServer.close();
+        } catch (_err) {
+            // ignore
+        }
+        obsServer = null;
+        obsServerPort = 0;
+    };
+
+    api.rpc.handle('pushObsState', async (payload) => {
+        if (payload && typeof payload === 'object') {
+            if (typeof payload.connection === 'string') obsState.connection = payload.connection;
+            if (typeof payload.roomId === 'string') obsState.roomId = payload.roomId;
+            if (Array.isArray(payload.requests)) obsState.requests = payload.requests.slice(0, 100);
+            obsState.pushedAt = Date.now();
+        }
+        return { ok: true };
+    });
+
+    api.rpc.handle('obsStatus', async () => {
+        if (!obsServer) await startObsServer();
+        return { ok: Boolean(obsServer), port: obsServerPort };
+    });
+
+    void startObsServer();
+
     api.lifecycle.onDeactivate(() => {
         controller.stop();
+        stopObsServer();
     });
 };
 
