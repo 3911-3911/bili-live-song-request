@@ -34,6 +34,8 @@ export default function activate(folium) {
         lastDanmu: null,             // { text, uname, matched, ts }
         lastResult: null,            // { uname, keyword, title?, status, ts }
         currentIsViewerRequest: false,
+        playingSince: 0,               // 降级链模式：当前点歌开播时刻（重播/回声判定）
+        mode: 'queue',                 // queue = 分支模型（宿主队列重排）；chain = 降级链接播
     };
 
     const listeners = new Set();
@@ -305,13 +307,128 @@ export default function activate(folium) {
     // ------------------------------------------------------------------
     // 搜索与播放（经 main 的 Stage API 桥）
     //
-    // 播放模型（v1.3 起）：模组自治队列——点歌从不写入宿主的总队列
-    // （那会污染空闲歌单，且舞台会话上下文里追加会写进停摆快照），
-    // 而是每次只对宿主做「立即播放这一首」；请求之间的衔接由
-    // guardQueue 守卫在 songChanged / 秒级心跳上驱动，保证点歌
-    // 永远优先于空闲歌单。空闲歌单在首条点歌打断前快照，全部点歌
-    // 结束后一次性批量交还。
+    // 双模式（v1.4 起）：
+    // - queue（默认，普通播放上下文）：忠实复刻分支版——新点歌 append 进
+    //   宿主队列、move 到点歌区（当前歌之后），立即播放时 select 该项。
+    //   宿主持有完整队列 [.., 当前, 点歌..., 歌单剩余]，连播/切歌/循环/FM
+    //   全部由宿主原生引擎处理；模组只在 songChanged 时对账：把已唱完的
+    //   请求从队列 remove、标记状态。没有轮询守卫，没有跨进程时序假设。
+    // - chain（舞台会话上下文降级，宿主拒绝队列编辑）：每次只 play 一首，
+    //   由守卫衔接（v1.3 行为），空闲歌单打断前快照、结束后交还。
     // ------------------------------------------------------------------
+
+    const stageQueueStatus = async () => {
+        const result = await folium.rpc.call('stage', { op: 'queueStatus' });
+        if (!result || !result.ok) return null;
+        return result.data || null;
+    };
+
+    const stageQueueOp = async (payload) => {
+        const result = await folium.rpc.call('stage', { op: 'queue', ...payload });
+        if (!result || !result.ok) {
+            throw new Error(result?.error || 'Stage queue op failed');
+        }
+        return result;
+    };
+
+    // 分支模型的队列重排。返回 false 表示宿主当前不允许队列编辑
+    // （舞台会话等），调用方应降级到链接模式。
+    const applyRequestViaQueue = async (songId, wantPlayNow) => {
+        const before = await stageQueueStatus();
+        const caps = before?.queueCapabilities || {};
+        if (!caps.append || !caps.move || (wantPlayNow && !caps.select)) {
+            return false;
+        }
+        await stageQueueOp({ action: 'append', songIds: [songId] });
+
+        const after = await stageQueueStatus();
+        if (!after || !after.queue) {
+            throw new Error('Queue status unavailable after append.');
+        }
+        let items = after.queue.items || [];
+        let mine = [...items].reverse().find((entry) => Number(entry.id) === songId) || null;
+        // 长队列时 items 是窗口视图；刚 append 的歌在队尾，去尾部窗口找。
+        if (!mine && Number(after.queue.length) > items.length) {
+            const tail = await folium.rpc.call('stage', {
+                op: 'queueTail',
+                offset: Math.max(0, Number(after.queue.length) - 3),
+            });
+            const tailItems = tail?.data?.queue?.items || [];
+            mine = [...tailItems].reverse().find((entry) => Number(entry.id) === songId) || null;
+            if (mine) items = items.concat(tailItems);
+        }
+        if (!mine || !mine.queueItemId) {
+            throw new Error('Appended queue item was not found.');
+        }
+        // queueItemId 按位置编码（source:id:index），move 之后会变——
+        // 后续操作一律用索引。
+        const mineIndex = Number(mine.queueItemId.slice(mine.queueItemId.lastIndexOf(':') + 1));
+        const currentIndex = Number(after.queue.currentIndex);
+        const queueLength = Number(after.queue.length);
+        if (!Number.isInteger(mineIndex) || !Number.isInteger(queueLength)) {
+            throw new Error('Queue index unavailable after append.');
+        }
+        const baseIndex = Number.isInteger(currentIndex) && currentIndex >= 0 ? currentIndex : -1;
+        const pendingBefore = state.requests.filter((item) => item.status !== 'playing').length;
+        const targetIndex = Math.min(
+            baseIndex + 1 + (wantPlayNow ? 0 : pendingBefore),
+            queueLength - 1,
+        );
+        if (mineIndex !== targetIndex) {
+            await stageQueueOp({ action: 'move', queueItemId: mine.queueItemId, toIndex: targetIndex });
+        }
+        if (wantPlayNow) {
+            await stageQueueOp({ action: 'select', index: targetIndex });
+        }
+        return true;
+    };
+
+    // 已唱完的请求从宿主队列移除（分支版 removeBiliLiveSongsFromQueue 的对应物）。
+    const removeSongsFromHostQueue = async (songIds) => {
+        if (!songIds || songIds.length === 0) return;
+        try {
+            const status = await stageQueueStatus();
+            const items = status?.queue?.items || [];
+            for (const songId of songIds) {
+                const match = items.find((entry) => Number(entry.id) === songId);
+                if (match && match.queueItemId) {
+                    try {
+                        await stageQueueOp({ action: 'remove', queueItemId: match.queueItemId });
+                    } catch (_err) {
+                        // 单项失败不影响其余
+                    }
+                }
+            }
+        } catch (_err) {
+            // 尽力而为；对账以本地列表为准
+        }
+    };
+
+    // 分支模型的对账：换歌时标记播放中、清掉已完成的请求（本地 + 宿主队列）。
+    const onSongChangedQueueMode = (event) => {
+        const songId = event?.song?.id ? Number(event.song.id) : null;
+        const match = songId === null ? null : state.requests.find((item) => item.songId === songId);
+        if (match) {
+            const index = state.requests.indexOf(match);
+            const completed = state.requests.slice(0, index);
+            state.requests = state.requests.slice(index)
+                .map((item, i) => ({ ...item, status: i === 0 ? 'playing' : 'queued' }));
+            state.currentIsViewerRequest = true;
+            state.playingSince = Date.now();
+            if (completed.length > 0) {
+                void removeSongsFromHostQueue(completed.map((item) => item.songId));
+            }
+        } else {
+            const playing = state.requests.find((item) => item.status === 'playing');
+            if (playing) {
+                state.requests = state.requests.filter((item) => item.id !== playing.id);
+                void removeSongsFromHostQueue([playing.songId]);
+            }
+            state.currentIsViewerRequest = false;
+        }
+        notify();
+        persistSoon();
+    };
 
     const stageSearch = async (query, limit) => {
         const result = await folium.rpc.call('stage', { op: 'search', query, limit });
@@ -353,23 +470,33 @@ export default function activate(folium) {
         }
     };
 
-    // 全部点歌结束后把快照的歌单尾巴一次性批量交还（普通上下文有效；
-    // 舞台会话上下文队列为空、快照自然为空，宿主会自行续播）。
+    // 全部点歌结束后把快照的歌单尾巴交还：从断点那首继续播放，
+    // 其余批量接回队列——歌单完整恢复并自动续播。
     const handBackTail = async () => {
         const tail = state.playlistTail;
         state.playlistTail = [];
         if (!tail || tail.length === 0) return;
         try {
-            const result = await folium.rpc.call('stage', {
-                op: 'queue',
-                action: 'append',
-                songIds: tail.map((item) => item.songId),
-            });
-            if (!result || !result.ok) {
-                folium.log.warn('hand back playlist tail failed:', result?.error);
+            await playSongNow(tail[0].songId);
+            if (tail.length > 1) {
+                await folium.rpc.call('stage', {
+                    op: 'queue',
+                    action: 'append',
+                    songIds: tail.slice(1).map((item) => item.songId),
+                });
             }
         } catch (error) {
             folium.log.warn('hand back playlist tail failed:', error);
+            // 兜底：至少把歌单接回队列（不自动续播）
+            try {
+                await folium.rpc.call('stage', {
+                    op: 'queue',
+                    action: 'append',
+                    songIds: tail.map((item) => item.songId),
+                });
+            } catch (_err) {
+                // 无能为力，等宿主自行恢复
+            }
         }
     };
 
@@ -412,26 +539,38 @@ export default function activate(folium) {
                 toast(L(`「${candidate.title}」已在播放或排队`, `"${candidate.title}" is already playing or queued`), 'info');
                 return;
             }
-            if (!wantPlayNow) break;
+            if (!wantPlayNow && state.mode === 'chain') break;
             try {
-                await playSongNow(candidate.songId);
-                guardLastPlayAt = Date.now();
-                deferredBehindId = null;
+                // 首选分支模型：append + move(+select) 重排宿主队列；
+                // 宿主不允许队列编辑（舞台会话）时降级为链接模式。
+                const viaQueue = state.mode === 'queue'
+                    ? await applyRequestViaQueue(candidate.songId, wantPlayNow)
+                    : false;
+                state.mode = viaQueue ? 'queue' : 'chain';
+                if (!viaQueue && wantPlayNow) {
+                    if (!(state.playlistTail && state.playlistTail.length)) {
+                        await snapshotPlaylistTail();
+                    }
+                    await playSongNow(candidate.songId);
+                    guardLastPlayAt = Date.now();
+                    deferredBehindId = null;
+                }
                 applied = candidate;
                 break;
             } catch (error) {
                 lastError = error;
-                folium.log.warn('play candidate failed:', candidate.songId, error);
+                folium.log.warn('apply candidate failed:', candidate.songId, error);
             }
         }
 
-        if (wantPlayNow && !applied) {
-            setLastResult(uname, keyword, 'error');
-            toast(L(`点歌播放失败：${lastError ? lastError.message : '未知错误'}`, `Song request failed: ${lastError ? lastError.message : 'unknown error'}`), 'error');
-            return;
-        }
-        if (!wantPlayNow) {
-            applied = candidates[0];
+        if (!applied) {
+            if (!wantPlayNow) {
+                applied = candidates[0];
+            } else {
+                setLastResult(uname, keyword, 'error');
+                toast(L(`点歌播放失败：${lastError ? lastError.message : '未知错误'}`, `Song request failed: ${lastError ? lastError.message : 'unknown error'}`), 'error');
+                return;
+            }
         }
 
         // 新请求开始播放时，上一首「播放中」的点歌视为已被接替。
@@ -451,6 +590,7 @@ export default function activate(folium) {
         });
         if (wantPlayNow) {
             state.currentIsViewerRequest = true;
+            state.playingSince = Date.now();
         }
 
         setLastResult(uname, keyword, wantPlayNow ? 'played' : 'queued', applied.title);
@@ -495,6 +635,7 @@ export default function activate(folium) {
                 item.songId === next.songId ? { ...item, status: 'playing' } : item
             ));
             state.currentIsViewerRequest = true;
+            state.playingSince = Date.now();
             notify();
             persistSoon();
         } catch (error) {
@@ -515,6 +656,26 @@ export default function activate(folium) {
         }
     };
 
+    // 当前点歌已播完：收尾，有排队就接播下一首，没有就交还空闲歌单。
+    const finishPlayingAndAdvance = () => {
+        const playing = state.requests.find((item) => item.status === 'playing');
+        if (playing) {
+            state.requests = state.requests.filter((item) => item.id !== playing.id);
+            state.currentIsViewerRequest = false;
+            state.playingSince = 0;
+            notify();
+            persistSoon();
+        }
+        const pending = state.requests.filter((item) => item.status !== 'playing');
+        if (pending.length > 0) {
+            void playNextPending();
+        } else {
+            void handBackTail();
+        }
+    };
+
+    let stoppedTicks = 0;
+
     const guardQueue = () => {
         if (!isMainContext) return;
         const pending = state.requests.filter((item) => item.status !== 'playing');
@@ -529,14 +690,21 @@ export default function activate(folium) {
             return;
         }
 
+        // 停播监视：宿主队列耗尽后停在 stopped（不再换歌），连续两拍确认后收尾。
+        if (playing && playerState === 'stopped') {
+            stoppedTicks += 1;
+            if (stoppedTicks >= 2) {
+                stoppedTicks = 0;
+                finishPlayingAndAdvance();
+            }
+            return;
+        }
+        stoppedTicks = 0;
+
         if (pending.length === 0) {
             if (playing && currentId !== null && currentId !== playing.songId) {
                 // 最后一首点歌结束，宿主已切走：收尾并交还空闲歌单
-                state.requests = state.requests.filter((item) => item.id !== playing.id);
-                state.currentIsViewerRequest = false;
-                notify();
-                persistSoon();
-                void handBackTail();
+                finishPlayingAndAdvance();
             }
             return;
         }
@@ -582,9 +750,18 @@ export default function activate(folium) {
         }
     };
 
-    // 切歌：还有排队点歌时直接接播下一首（点歌优先）；没有点歌时交给宿主。
+    // 切歌：分支模型下队列已排好，宿主原生 next() 自然切到下一首点歌；
+    // 降级链模式直接接播下一首点歌；没有点歌时交给宿主。
     const skipCurrent = () => {
         const pending = state.requests.filter((item) => item.status !== 'playing');
+        if (state.mode === 'queue') {
+            try {
+                folium.playback.next();
+            } catch (error) {
+                folium.log.warn('skip failed:', error);
+            }
+            return;
+        }
         if (pending.length > 0) {
             state.requests = state.requests.filter((item) => item.status !== 'playing');
             guardLastPlayAt = 0;
@@ -730,8 +907,31 @@ export default function activate(folium) {
     // 播放事件对账
     // ------------------------------------------------------------------
 
-    const onSongChanged = () => {
-        // 播放衔接完全由队列守卫裁决（见 guardQueue）。
+    const onSongChanged = (event) => {
+        if (state.mode === 'queue') {
+            // 分支模型：宿主原生引擎驱动衔接，这里只做对账清理。
+            onSongChangedQueueMode(event);
+            return;
+        }
+        const songId = event?.song?.id ? Number(event.song.id) : null;
+        const playing = state.requests.find((item) => item.status === 'playing');
+        if (playing && songId === playing.songId) {
+            // 同一首歌再次开始。两种可能：宿主循环模式的重播（这首歌已经完整
+            // 播过一轮，应推进）——或者只是我们自己播放调用的跨进程回声（事件
+            // 晚于播放标记到达，忽略）。用开播后经过的时间区分：回声在秒级内，
+            // 真重播至少要超过半个歌曲时长。
+            let duration = 0;
+            try {
+                duration = folium.playback.getState().duration || 0;
+            } catch (_err) {
+                duration = 0;
+            }
+            const elapsed = Date.now() - (state.playingSince || 0);
+            if (elapsed > Math.max(5000, duration * 500)) {
+                finishPlayingAndAdvance();
+            }
+            return;
+        }
         guardQueue();
     };
 
@@ -1004,10 +1204,12 @@ export default function activate(folium) {
         notify();
         // 设置面板里改 OBS 叠加层参数时实时推给展示页。
         disposers.push(settingsSection.params.subscribe(() => pushObs()));
-        // 每秒：跑一次队列守卫（点歌优先、停播续接），播放中顺带刷新 OBS 进度快照。
+        // 每秒：降级链模式跑队列守卫；播放中刷新 OBS 进度快照。
         livePushTimer = setInterval(() => {
             try {
-                guardQueue();
+                if (state.mode === 'chain') {
+                    guardQueue();
+                }
                 if (folium.playback.getState().state === 'playing') {
                     pushObs();
                 }

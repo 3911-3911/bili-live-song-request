@@ -1209,6 +1209,10 @@ const handleStageOp = async (op) => {
             });
         case 'queueStatus':
             return stageRequest('GET', '/stage/player/queue?limit=200');
+        case 'queueTail': {
+            const offset = Math.max(0, Math.floor(Number(op.offset) || 0));
+            return stageRequest('GET', `/stage/player/queue?offset=${offset}&limit=5`);
+        }
         case 'playerStatus':
             return stageRequest('GET', '/stage/player/status');
         default:
