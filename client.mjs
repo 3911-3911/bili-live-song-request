@@ -71,7 +71,7 @@ export default function activate(folium) {
             lang: values.obsLang === 'en' ? 'en' : 'zh-CN',
             listX: Number(values.obsListX), listY: Number(values.obsListY),
             listWidth: Number(values.obsListWidth), listHeight: Number(values.obsListHeight),
-            cardRight: Number(values.obsCardRight), cardBottom: Number(values.obsCardBottom),
+            cardLeft: Number(values.obsCardLeft), cardBottom: Number(values.obsCardBottom),
             cardWidth: Number(values.obsCardWidth), cardHeight: Number(values.obsCardHeight),
         };
     };
@@ -278,7 +278,7 @@ export default function activate(folium) {
             { key: 'obsListY', type: 'number', defaultValue: 12, min: 0, max: 100, label: { 'zh-CN': '队列垂直位置（%）', en: 'Queue Y position (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
             { key: 'obsListWidth', type: 'number', defaultValue: 432, min: 280, max: 900, label: { 'zh-CN': '队列宽度（px）', en: 'Queue width (px)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
             { key: 'obsListHeight', type: 'number', defaultValue: 560, min: 220, max: 900, label: { 'zh-CN': '队列最大高度（px）', en: 'Queue max height (px)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
-            { key: 'obsCardRight', type: 'number', defaultValue: 2, min: 0, max: 100, label: { 'zh-CN': '卡片右边距（%）', en: 'Card right (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
+            { key: 'obsCardLeft', type: 'number', defaultValue: 66, min: 0, max: 100, label: { 'zh-CN': '卡片左边距（%）', en: 'Card left position (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
             { key: 'obsCardBottom', type: 'number', defaultValue: 3, min: 0, max: 100, label: { 'zh-CN': '卡片下边距（%）', en: 'Card bottom (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
             { key: 'obsCardWidth', type: 'number', defaultValue: 608, min: 320, max: 1000, label: { 'zh-CN': '卡片宽度（px）', en: 'Card width (px)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
             { key: 'obsCardHeight', type: 'number', defaultValue: 168, min: 132, max: 400, label: { 'zh-CN': '卡片高度（px，封面随之缩放）', en: 'Card height (px, cover scales)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },

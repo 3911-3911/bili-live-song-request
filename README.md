@@ -69,7 +69,7 @@ http://127.0.0.1:32198/
 http://127.0.0.1:32198/?stage=1
 ```
 
-其余 URL 参数：`accent`（主题色，如 `%236ee7ff`）、`speed`（滚动速度 5-120）、`mode`（`loop`/`ping-pong`）、`header=0`（隐藏列表标题）、`listX/listY/listWidth/listHeight`、`cardRight/cardBottom/cardWidth/cardHeight`、`lang=en`。
+其余 URL 参数：`accent`（主题色，如 `%236ee7ff`）、`speed`（滚动速度 5-120）、`mode`（`loop`/`ping-pong`）、`header=0`（隐藏列表标题）、`listX/listY/listWidth/listHeight`、`cardLeft/cardBottom/cardWidth/cardHeight`、`lang=en`。
 
 播放数据优先取宿主 Stage API；舞台会话上下文里 Stage 不报播放态时，自动回退到模组每秒推送的宿主播放快照（无封面，其余信息完整）。
 

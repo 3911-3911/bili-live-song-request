@@ -1306,7 +1306,7 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
   backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: var(--shadow); }
 
 /* ---------- 正在播放卡片 ---------- */
-#card { right: CARD_RIGHT_PLACEHOLDER; bottom: CARD_BOTTOM_PLACEHOLDER; width: CARD_WIDTH_PLACEHOLDER;
+#card { left: CARD_LEFT_PLACEHOLDER; bottom: CARD_BOTTOM_PLACEHOLDER; width: CARD_WIDTH_PLACEHOLDER;
   height: CARD_HEIGHT_PLACEHOLDER; padding: 14px; border-radius: 30px; }
 #card .inner { position: relative; display: flex; gap: 16px; height: 100%; align-items: center; }
 #card .cover-bg { position: absolute; inset: -20%; background-size: cover; background-position: center;
@@ -1339,7 +1339,7 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
   left: LIST_LEFT_PLACEHOLDER; top: LIST_TOP_PLACEHOLDER; width: LIST_WIDTH_PLACEHOLDER;
   max-height: LIST_HEIGHT_PLACEHOLDER; }
 #list header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 6px 14px 10px; flex: none; text-shadow: 0 2px 14px rgba(0,0,0,.65); }
+  padding: 4px 2px 10px; flex: none; text-shadow: 0 2px 14px rgba(0,0,0,.65); }
 #list header .heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
 #list header .icon-box { width: 36px; height: 36px; flex: none; display: grid; place-items: center;
   border-radius: 14px; background: var(--accent-soft); }
@@ -1429,14 +1429,14 @@ const cfg = {
 const defaults = {
   stage: true, speed: 18, mode: 'loop', header: true, accent: null, lang: null,
   listX: 2, listY: 12, listWidth: 432, listHeight: 560,
-  cardRight: 2, cardBottom: 3, cardWidth: 608, cardHeight: 168,
+  cardLeft: 66, cardBottom: 3, cardWidth: 608, cardHeight: 168,
 };
 const urlOverrides = {
   stage: params.get('stage') === '0' ? false : params.get('stage') === '1' ? true : undefined,
   speed: num('speed'), mode: str('mode'), accent: str('accent'), lang: str('lang'),
   header: params.get('header') === '0' ? false : params.get('header') === '1' ? true : undefined,
   listX: num('listX'), listY: num('listY'), listWidth: num('listWidth'), listHeight: num('listHeight'),
-  cardRight: num('cardRight'), cardBottom: num('cardBottom'), cardWidth: num('cardWidth'), cardHeight: num('cardHeight'),
+  cardLeft: num('cardLeft'), cardBottom: num('cardBottom'), cardWidth: num('cardWidth'), cardHeight: num('cardHeight'),
 };
 let modObs = {};
 const pick = (key) => {
@@ -1457,7 +1457,7 @@ const applyLayout = () => {
     header: pick('header') === true,
     lang: pick('lang') === 'en' ? 'en' : 'zh-CN',
     listX: pick('listX'), listY: pick('listY'), listWidth: pick('listWidth'), listHeight: pick('listHeight'),
-    cardRight: pick('cardRight'), cardBottom: pick('cardBottom'), cardWidth: pick('cardWidth'), cardHeight: pick('cardHeight'),
+    cardLeft: pick('cardLeft'), cardBottom: pick('cardBottom'), cardWidth: pick('cardWidth'), cardHeight: pick('cardHeight'),
   };
   const json = JSON.stringify(layout);
   if (json === appliedLayoutJson) return layout;
@@ -1469,7 +1469,7 @@ const applyLayout = () => {
   list.style.top = layout.listY + '%';
   list.style.width = layout.listWidth + 'px';
   list.style.maxHeight = 'min(' + layout.listHeight + 'px, 86vh)';
-  card.style.right = layout.cardRight + '%';
+  card.style.left = layout.cardLeft + '%';
   card.style.bottom = layout.cardBottom + '%';
   card.style.width = layout.cardWidth + 'px';
   card.style.height = layout.cardHeight + 'px';
@@ -1774,7 +1774,7 @@ setInterval(() => { void tick(); }, 700);
         return OBS_PAGE_HTML
             .replace(/ACCENT_SOFT_PLACEHOLDER/, accent + '33')
             .replace(/ACCENT_PLACEHOLDER/, accent)
-            .replace(/CARD_RIGHT_PLACEHOLDER/, '2%')
+            .replace(/CARD_LEFT_PLACEHOLDER/, '66%')
             .replace(/CARD_BOTTOM_PLACEHOLDER/, '3%')
             .replace(/CARD_WIDTH_PLACEHOLDER/, '608px')
             .replace(/CARD_HEIGHT_PLACEHOLDER/, '168px')
