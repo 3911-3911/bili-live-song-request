@@ -249,10 +249,9 @@ export default function activate(folium) {
             { key: 'autoConnect', type: 'boolean', defaultValue: false, label: { 'zh-CN': '启动模组时自动连接', en: 'Auto-connect on activation' }, group: { 'zh-CN': '连接', en: 'Connection' } },
             { key: 'keywords', type: 'text', defaultValue: '点歌', label: { 'zh-CN': '点歌指令前缀', en: 'Command prefixes' }, description: { 'zh-CN': '逗号分隔，例如「点歌,点一首」', en: 'Comma-separated, e.g. "song,play"' }, group: { 'zh-CN': '指令', en: 'Commands' } },
             { key: 'playMode', type: 'select', defaultValue: 'play', label: { 'zh-CN': '播放模式', en: 'Play mode' }, options: [
-                { value: 'play', label: { 'zh-CN': '立即播放', en: 'Play now' } },
-                { value: 'queue', label: { 'zh-CN': '加入队列', en: 'Append to queue' } },
+                { value: 'play', label: { 'zh-CN': '立即播放（打断空闲歌单，绝不打断点歌）', en: 'Play now (cuts in idle playlist only)' } },
+                { value: 'queue', label: { 'zh-CN': '等待（空闲歌单播完后接播）', en: 'Wait for the idle playlist' } },
             ], group: { 'zh-CN': '播放', en: 'Playback' } },
-            { key: 'skipIdlePlaylist', type: 'boolean', defaultValue: true, label: { 'zh-CN': '空闲歌单让位', en: 'Skip idle playlist' }, description: { 'zh-CN': '无点歌排队时，新请求立即打断歌单歌曲', en: 'With no pending requests, a new request interrupts idle playlist songs' }, group: { 'zh-CN': '播放', en: 'Playback' } },
             { key: 'searchLimit', type: 'number', defaultValue: 5, min: 1, max: 10, label: { 'zh-CN': '搜索候选数', en: 'Search candidates' }, group: { 'zh-CN': '播放', en: 'Playback' } },
             { key: 'maxQueueSize', type: 'number', defaultValue: 20, min: 1, max: 100, label: { 'zh-CN': '队列上限', en: 'Max queue size' }, group: { 'zh-CN': '限额', en: 'Limits' } },
             { key: 'maxRequestsPerUser', type: 'number', defaultValue: 2, min: 1, max: 10, label: { 'zh-CN': '每人排队上限', en: 'Max per viewer' }, group: { 'zh-CN': '限额', en: 'Limits' } },
@@ -400,12 +399,10 @@ export default function activate(folium) {
 
         const playbackState = folium.playback.getState();
         const hasCurrent = Boolean(playbackState.song) && playbackState.state !== 'stopped';
-        // 与分支版 shouldPlayBiliLiveRequestNow 对齐：activeRequestCount 含播放中的请求。
-        const wantPlayNow = values.playMode === 'play'
-            || !hasCurrent
-            || (values.skipIdlePlaylist
-                && !state.currentIsViewerRequest
-                && state.requests.length === 0);
+        // 立即播放只打断空闲歌单，绝不打断正在播放的别人点歌；
+        // 等待模式下空闲歌单也照常播完，由守卫在歌唱完后接播。
+        const wantPlayNow = !hasCurrent
+            || (!state.currentIsViewerRequest && values.playMode === 'play');
 
         let applied = null;
         let lastError = null;
@@ -417,11 +414,9 @@ export default function activate(folium) {
             }
             if (!wantPlayNow) break;
             try {
-                if (!(state.playlistTail && state.playlistTail.length)) {
-                    await snapshotPlaylistTail();
-                }
                 await playSongNow(candidate.songId);
                 guardLastPlayAt = Date.now();
+                deferredBehindId = null;
                 applied = candidate;
                 break;
             } catch (error) {
@@ -476,6 +471,8 @@ export default function activate(folium) {
     const guardFailures = new Map();   // songId -> 连续播放失败次数
     let guardBusy = false;
     let guardLastPlayAt = 0;
+    let deferredBehindId = null;       // 等待模式下正在让位的空闲歌曲 id
+    let guardSeenId = null;            // 守卫上次看到的宿主当前歌（换歌 = 真实过渡）
 
     const playNextPending = async () => {
         if (guardBusy) return;
@@ -484,9 +481,14 @@ export default function activate(folium) {
         const next = pending[0];
         guardBusy = true;
         try {
+            // 首次真正接播前快照空闲歌单（之后交还）；打断的是点歌时快照自然为空。
+            if (!(state.playlistTail && state.playlistTail.length)) {
+                await snapshotPlaylistTail();
+            }
             await playSongNow(next.songId);
             guardLastPlayAt = Date.now();
             guardFailures.delete(next.songId);
+            deferredBehindId = null;
             // 上一首播放中的点歌已被接替
             state.requests = state.requests.filter((item) => item.status !== 'playing');
             state.requests = state.requests.map((item) => (
@@ -554,8 +556,28 @@ export default function activate(folium) {
             return;
         }
 
-        // 宿主空闲 / 被歌单或 FM 抢跑 → 强制播放下一首点歌（带冷却，避免互相追逐）
-        if (Date.now() - guardLastPlayAt > 2500) {
+        const hasCurrent = currentId !== null && playerState !== 'stopped';
+        const isTransition = currentId !== guardSeenId;
+        guardSeenId = currentId;
+
+        if (hasCurrent && settingsSection.params.get().playMode !== 'play') {
+            // 等待模式：在当前这首（空闲歌单的歌）后面排队；
+            // 它唱完（songChanged 换歌）时立刻接播点歌。
+            if (deferredBehindId !== currentId) {
+                if (deferredBehindId !== null) {
+                    deferredBehindId = null;
+                    void playNextPending();
+                    return;
+                }
+                deferredBehindId = currentId;
+            }
+            return;
+        }
+
+        // 宿主空闲 / 立即模式被歌单或 FM 抢跑 → 强制播放下一首点歌。
+        // 换歌是真实过渡，立即接播；其余情况带冷却，避免与渲染器
+        // 状态滞后互相追逐。
+        if (isTransition || Date.now() - guardLastPlayAt > 2500) {
             void playNextPending();
         }
     };
