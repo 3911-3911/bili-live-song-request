@@ -59,6 +59,23 @@ export default function activate(folium) {
     };
 
     // 把请求队列与连接状态推给 main 的 OBS 页面服务（节流）。
+    // OBS 叠加层设置快照：随 obsState 推送给展示页（URL 参数仍可临时覆盖）。
+    const buildObsPayload = () => {
+        const values = settingsSection.params.get();
+        return {
+            stage: values.obsStage === true,
+            header: values.obsShowHeader !== false,
+            mode: values.obsScrollMode === 'ping-pong' ? 'ping-pong' : 'loop',
+            speed: Number(values.obsScrollSpeed) || 18,
+            accent: String(values.obsAccent || '').trim() || null,
+            lang: values.obsLang === 'en' ? 'en' : 'zh-CN',
+            listX: Number(values.obsListX), listY: Number(values.obsListY),
+            listWidth: Number(values.obsListWidth), listHeight: Number(values.obsListHeight),
+            cardRight: Number(values.obsCardRight), cardBottom: Number(values.obsCardBottom),
+            cardWidth: Number(values.obsCardWidth), cardHeight: Number(values.obsCardHeight),
+        };
+    };
+
     let obsPushTimer = null;
     let obsPushQueued = false;
     const pushObs = () => {
@@ -92,6 +109,7 @@ export default function activate(folium) {
                 roomId: state.roomId,
                 current,
                 theme: latestTheme,
+                obs: buildObsPayload(),
                 requests: state.requests.map((item) => ({
                     songId: item.songId,
                     title: item.title,
@@ -244,6 +262,26 @@ export default function activate(folium) {
             { key: 'allowAdmins', type: 'boolean', defaultValue: true, label: { 'zh-CN': '允许房管', en: 'Allow admins' }, group: { 'zh-CN': '权限', en: 'Permissions' } },
             { key: 'requiredMedalName', type: 'text', defaultValue: '', label: { 'zh-CN': '要求的粉丝牌名（可选）', en: 'Required fan medal (optional)' }, group: { 'zh-CN': '权限', en: 'Permissions' } },
             { key: 'requiredMedalLevel', type: 'number', defaultValue: 0, min: 0, max: 40, label: { 'zh-CN': '要求的粉丝牌等级', en: 'Required medal level' }, group: { 'zh-CN': '权限', en: 'Permissions' } },
+            { key: 'obsStage', type: 'boolean', defaultValue: true, label: { 'zh-CN': '叠加层嵌入舞台动画', en: 'Embed stage animation' }, description: { 'zh-CN': 'OBS 页面底层嵌入宿主歌词页面', en: 'Embed the host lyrics page under the overlay' }, group: { 'zh-CN': 'OBS 叠加层', en: 'OBS overlay' } },
+            { key: 'obsShowHeader', type: 'boolean', defaultValue: true, label: { 'zh-CN': '显示队列标题栏', en: 'Show queue header' }, group: { 'zh-CN': 'OBS 叠加层', en: 'OBS overlay' } },
+            { key: 'obsScrollMode', type: 'select', defaultValue: 'loop', label: { 'zh-CN': '队列滚动方式', en: 'Queue scroll mode' }, options: [
+                { value: 'loop', label: { 'zh-CN': '循环', en: 'Loop' } },
+                { value: 'ping-pong', label: { 'zh-CN': '往返', en: 'Ping-pong' } },
+            ], group: { 'zh-CN': 'OBS 叠加层', en: 'OBS overlay' } },
+            { key: 'obsScrollSpeed', type: 'number', defaultValue: 18, min: 5, max: 120, label: { 'zh-CN': '队列滚动速度', en: 'Scroll speed' }, group: { 'zh-CN': 'OBS 叠加层', en: 'OBS overlay' } },
+            { key: 'obsAccent', type: 'text', defaultValue: '', label: { 'zh-CN': '强调色（空 = 跟随主题）', en: 'Accent color (empty = theme)' }, description: { 'zh-CN': '形如 #e8b64c 的十六进制颜色', en: 'Hex color like #e8b64c' }, group: { 'zh-CN': 'OBS 叠加层', en: 'OBS overlay' } },
+            { key: 'obsLang', type: 'select', defaultValue: 'zh-CN', label: { 'zh-CN': '叠加层语言', en: 'Overlay language' }, options: [
+                { value: 'zh-CN', label: { 'zh-CN': '中文', en: 'Chinese' } },
+                { value: 'en', label: { 'zh-CN': 'English', en: 'English' } },
+            ], group: { 'zh-CN': 'OBS 叠加层', en: 'OBS overlay' } },
+            { key: 'obsListX', type: 'number', defaultValue: 2, min: 0, max: 100, label: { 'zh-CN': '队列水平位置（%）', en: 'Queue X position (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
+            { key: 'obsListY', type: 'number', defaultValue: 12, min: 0, max: 100, label: { 'zh-CN': '队列垂直位置（%）', en: 'Queue Y position (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
+            { key: 'obsListWidth', type: 'number', defaultValue: 432, min: 280, max: 900, label: { 'zh-CN': '队列宽度（px）', en: 'Queue width (px)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
+            { key: 'obsListHeight', type: 'number', defaultValue: 560, min: 220, max: 900, label: { 'zh-CN': '队列最大高度（px）', en: 'Queue max height (px)' }, group: { 'zh-CN': 'OBS 叠加层 · 队列面板', en: 'OBS overlay · Queue panel' } },
+            { key: 'obsCardRight', type: 'number', defaultValue: 2, min: 0, max: 100, label: { 'zh-CN': '卡片右边距（%）', en: 'Card right (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
+            { key: 'obsCardBottom', type: 'number', defaultValue: 3, min: 0, max: 100, label: { 'zh-CN': '卡片下边距（%）', en: 'Card bottom (%)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
+            { key: 'obsCardWidth', type: 'number', defaultValue: 608, min: 320, max: 1000, label: { 'zh-CN': '卡片宽度（px）', en: 'Card width (px)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
+            { key: 'obsCardHeight', type: 'number', defaultValue: 168, min: 132, max: 400, label: { 'zh-CN': '卡片高度（px，封面随之缩放）', en: 'Card height (px, cover scales)' }, group: { 'zh-CN': 'OBS 叠加层 · 播放卡片', en: 'OBS overlay · Now-playing card' } },
         ],
     });
 
@@ -842,6 +880,8 @@ export default function activate(folium) {
         // 确保 main 侧 OBS 页面服务在运行，并做一次初始推送。
         folium.rpc.call('obsStatus').catch(() => {});
         notify();
+        // 设置面板里改 OBS 叠加层参数时实时推给展示页。
+        disposers.push(settingsSection.params.subscribe(() => pushObs()));
         // 播放中每秒刷新一次 OBS 页面的进度兜底快照。
         livePushTimer = setInterval(() => {
             try {

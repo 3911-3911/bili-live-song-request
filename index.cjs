@@ -1271,6 +1271,7 @@ module.exports = function activate(api) {
         requests: [],
         current: null,
         theme: null,
+        obs: null,
         pushedAt: 0,
     };
 
@@ -1310,10 +1311,10 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 #card .inner { position: relative; display: flex; gap: 16px; height: 100%; align-items: center; }
 #card .cover-bg { position: absolute; inset: -20%; background-size: cover; background-position: center;
   opacity: .14; filter: blur(28px); }
-#card .cover { position: relative; width: COVER_SIZE_PLACEHOLDER; height: COVER_SIZE_PLACEHOLDER; flex: none;
+#card .cover { position: relative; height: 100%; aspect-ratio: 1 / 1; flex: none;
   border-radius: 18px; border: 1px solid var(--border); background: var(--accent-soft);
   object-fit: cover; }
-#card .cover-placeholder { display: grid; place-items: center; font-size: 30px; color: var(--accent); }
+#card .cover-placeholder { display: grid; place-items: center; font-size: 34px; color: var(--accent); }
 #card .meta { position: relative; min-width: 0; flex: 1; }
 #card .label { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600;
   letter-spacing: .18em; text-transform: uppercase; color: var(--accent); margin-bottom: 7px; }
@@ -1333,11 +1334,12 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 #card .time { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted);
   margin-top: 5px; font-variant-numeric: tabular-nums; }
 
-/* ---------- 队列列表 ---------- */
-#list { left: LIST_LEFT_PLACEHOLDER; top: LIST_TOP_PLACEHOLDER; width: LIST_WIDTH_PLACEHOLDER;
+/* ---------- 队列列表（无外框：行卡片自带玻璃底，标题浮于动画之上） ---------- */
+#list { position: absolute; display: flex; flex-direction: column; overflow: visible; z-index: 2;
+  left: LIST_LEFT_PLACEHOLDER; top: LIST_TOP_PLACEHOLDER; width: LIST_WIDTH_PLACEHOLDER;
   max-height: LIST_HEIGHT_PLACEHOLDER; }
 #list header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 14px 14px 10px; flex: none; }
+  padding: 6px 14px 10px; flex: none; text-shadow: 0 2px 14px rgba(0,0,0,.65); }
 #list header .heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
 #list header .icon-box { width: 36px; height: 36px; flex: none; display: grid; place-items: center;
   border-radius: 14px; background: var(--accent-soft); }
@@ -1346,10 +1348,11 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 #list header .live { width: 9px; height: 9px; border-radius: 999px; background: var(--accent);
   animation: pulse 1.6s ease-in-out infinite; flex: none; }
 @keyframes pulse { 50% { opacity: .35; } }
-#list .viewport { overflow: hidden; flex: 1; min-height: 0; position: relative; }
-#list .track { display: flex; flex-direction: column; gap: 10px; padding: 0 14px 14px; will-change: transform; }
+#list .viewport { overflow: hidden; flex: 1; min-height: 0; position: relative; border-radius: 20px; }
+#list .track { display: flex; flex-direction: column; gap: 10px; padding: 0 0 4px; will-change: transform; }
 .row { display: flex; align-items: center; gap: 12px; border-radius: 20px; border: 1px solid var(--border);
-  padding: 10px 12px; background: rgba(255, 255, 255, 0.03); flex: none; }
+  padding: 10px 12px; background: var(--surface-strong); flex: none;
+  backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
 .row.emphasized { border-color: var(--accent); }
 .row .num { width: 36px; height: 36px; flex: none; display: grid; place-items: center;
   border-radius: 12px; background: var(--accent-soft); color: var(--accent);
@@ -1366,7 +1369,8 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 .row .sub .by { flex: none; display: inline-flex; align-items: center; gap: 5px; max-width: 46%;
   color: var(--text); background: var(--accent-soft); border-radius: 999px; padding: 2px 10px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.empty { padding: 10px 16px 18px; font-size: 14px; color: var(--muted); }
+.empty { padding: 10px 16px 6px; font-size: 14px; color: var(--muted); text-shadow: 0 2px 12px rgba(0,0,0,.7);
+  background: var(--surface-strong); border-radius: 16px; border: 1px solid var(--border); margin: 4px 0; }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -1388,7 +1392,7 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
     </div>
   </section>
 
-  <section id="list" class="panel">
+  <section id="list">
     <header id="listHeader">
       <div class="heading">
         <div class="icon-box">
@@ -1407,55 +1411,108 @@ html, body { width: 100%; height: 100%; background: transparent; overflow: hidde
 </div>
 <script>
 'use strict';
-// ---- 配置：URL 参数覆盖默认布局 ----
+// ---- 配置：URL 参数 > 模组设置（/state 推送）> 默认值 ----
 const params = new URLSearchParams(location.search);
+const num = (key) => {
+  const raw = params.get(key);
+  return raw === null || raw === '' ? undefined : Number(raw);
+};
+const str = (key) => {
+  const raw = params.get(key);
+  return raw === null || raw === '' ? undefined : raw;
+};
 const cfg = {
   stageBase: 'http://127.0.0.1:' + (params.get('stagePort') || '__STAGE_PORT__'),
   token: params.get('token') || '__STAGE_TOKEN__',
-  accent: params.get('accent') || '__ACCENT__',
-  accentProvided: params.get('accent') !== null,
   embedStageUrl: '__OBS_STAGE_URL__',
-  embedStage: params.get('stage') === '1',
-  listX: params.get('listX'), listY: params.get('listY'),
-  listWidth: params.get('listWidth'), listHeight: params.get('listHeight'),
-  cardRight: params.get('cardRight'), cardBottom: params.get('cardBottom'),
-  cardWidth: params.get('cardWidth'), cardHeight: params.get('cardHeight'),
-  speed: Math.min(120, Math.max(5, Number(params.get('speed')) || 18)),
-  mode: params.get('mode') === 'ping-pong' ? 'ping-pong' : 'loop',
-  header: params.get('header') !== '0',
-  lang: params.get('lang') === 'en' ? 'en' : 'zh-CN',
 };
-if (cfg.embedStage && cfg.embedStageUrl) {
-  const frame = document.createElement('iframe');
-  frame.id = 'stageFrame';
-  frame.src = cfg.embedStageUrl;
-  document.body.insertBefore(frame, document.body.firstChild);
-}
-const applyVar = (id, prop, value) => { if (value) document.getElementById(id).style.setProperty(prop, value); };
-document.documentElement.style.setProperty('--accent', cfg.accent);
-document.documentElement.style.setProperty('--accent-soft', cfg.accent + '33');
-applyVar('list', 'left', cfg.listX ? cfg.listX + '%' : null);
-applyVar('list', 'top', cfg.listY ? cfg.listY + '%' : null);
-applyVar('list', 'width', cfg.listWidth ? cfg.listWidth + 'px' : null);
-applyVar('list', 'max-height', cfg.listHeight ? cfg.listHeight + 'px' : null);
-applyVar('card', 'right', cfg.cardRight ? cfg.cardRight + '%' : null);
-applyVar('card', 'bottom', cfg.cardBottom ? cfg.cardBottom + '%' : null);
-applyVar('card', 'width', cfg.cardWidth ? cfg.cardWidth + 'px' : null);
-applyVar('card', 'height', cfg.cardHeight ? cfg.cardHeight + 'px' : null);
-if (!cfg.header) document.getElementById('listHeader').classList.add('hidden');
+const defaults = {
+  stage: true, speed: 18, mode: 'loop', header: true, accent: null, lang: null,
+  listX: 2, listY: 12, listWidth: 432, listHeight: 560,
+  cardRight: 2, cardBottom: 3, cardWidth: 608, cardHeight: 168,
+};
+const urlOverrides = {
+  stage: params.get('stage') === '0' ? false : params.get('stage') === '1' ? true : undefined,
+  speed: num('speed'), mode: str('mode'), accent: str('accent'), lang: str('lang'),
+  header: params.get('header') === '0' ? false : params.get('header') === '1' ? true : undefined,
+  listX: num('listX'), listY: num('listY'), listWidth: num('listWidth'), listHeight: num('listHeight'),
+  cardRight: num('cardRight'), cardBottom: num('cardBottom'), cardWidth: num('cardWidth'), cardHeight: num('cardHeight'),
+};
+let modObs = {};
+const pick = (key) => {
+  if (urlOverrides[key] !== undefined) return urlOverrides[key];
+  const fromMod = modObs[key];
+  if (fromMod !== undefined && fromMod !== null && fromMod !== '') return fromMod;
+  return defaults[key];
+};
+// 布局/行为设置随 /state 到达或变化时套用（URL 覆盖 > 模组设置 > 默认值）。
+let appliedLayoutJson = '';
+let stageFrameEl = null;
+let currentLang = null;
+const applyLayout = () => {
+  const layout = {
+    stage: pick('stage') === true,
+    speed: Math.min(120, Math.max(5, Number(pick('speed')) || 18)),
+    mode: pick('mode') === 'ping-pong' ? 'ping-pong' : 'loop',
+    header: pick('header') === true,
+    lang: pick('lang') === 'en' ? 'en' : 'zh-CN',
+    listX: pick('listX'), listY: pick('listY'), listWidth: pick('listWidth'), listHeight: pick('listHeight'),
+    cardRight: pick('cardRight'), cardBottom: pick('cardBottom'), cardWidth: pick('cardWidth'), cardHeight: pick('cardHeight'),
+  };
+  const json = JSON.stringify(layout);
+  if (json === appliedLayoutJson) return layout;
+  appliedLayoutJson = json;
 
-const T = cfg.lang === 'en' ? {
-  nowPlaying: 'NOW PLAYING', idle: 'Waiting for requests…', queueTitle: 'Song Requests',
-  none: 'No requests yet', playingBadge: 'Playing', empty: 'Queue is empty — send "song <title>"',
-  count: (n) => n + ' pending', by: (n) => n,
-} : {
-  nowPlaying: '正在播放', idle: '等待点歌…', queueTitle: '点歌队列',
-  none: '暂无点歌', playingBadge: '播放中', empty: '队列空闲，发送「点歌 歌名」点歌',
-  count: (n) => '待播 ' + n + ' 首', by: (n) => n,
+  const list = document.getElementById('list');
+  const card = document.getElementById('card');
+  list.style.left = layout.listX + '%';
+  list.style.top = layout.listY + '%';
+  list.style.width = layout.listWidth + 'px';
+  list.style.maxHeight = 'min(' + layout.listHeight + 'px, 86vh)';
+  card.style.right = layout.cardRight + '%';
+  card.style.bottom = layout.cardBottom + '%';
+  card.style.width = layout.cardWidth + 'px';
+  card.style.height = layout.cardHeight + 'px';
+  document.getElementById('listHeader').classList.toggle('hidden', !layout.header);
+
+  if (layout.stage && cfg.embedStageUrl && !stageFrameEl) {
+    stageFrameEl = document.createElement('iframe');
+    stageFrameEl.id = 'stageFrame';
+    stageFrameEl.src = cfg.embedStageUrl;
+    document.body.insertBefore(stageFrameEl, document.body.firstChild);
+  } else if (!layout.stage && stageFrameEl) {
+    stageFrameEl.remove();
+    stageFrameEl = null;
+  }
+
+  if (layout.lang !== currentLang) {
+    currentLang = layout.lang;
+    applyLang(layout.lang);
+  }
+  return layout;
 };
-document.getElementById('cardLabel').textContent = T.nowPlaying;
-document.getElementById('cardTitle').textContent = T.idle;
-document.getElementById('listTitle').textContent = T.queueTitle;
+let lastEntriesJson = '';
+
+const T = {
+  'zh-CN': {
+    nowPlaying: '正在播放', idle: '等待点歌…', queueTitle: '点歌队列',
+    none: '暂无点歌', playingBadge: '播放中', empty: '队列空闲，发送「点歌 歌名」点歌',
+    count: (n) => '待播 ' + n + ' 首',
+  },
+  en: {
+    nowPlaying: 'NOW PLAYING', idle: 'Waiting for requests…', queueTitle: 'Song Requests',
+    none: 'No requests yet', playingBadge: 'Playing', empty: 'Queue is empty — send "song <title>"',
+    count: (n) => n + ' pending',
+  },
+};
+const applyLang = (lang) => {
+  const t = T[lang] || T['zh-CN'];
+  document.getElementById('cardLabel').textContent = t.nowPlaying;
+  document.getElementById('cardTitle').textContent = t.idle;
+  document.getElementById('listTitle').textContent = t.queueTitle;
+  lastEntriesJson = '';
+};
+applyLayout();
 
 const fmt = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -1482,16 +1539,19 @@ let appliedThemeJson = '';
 const applyTheme = () => {
   const theme = modState.theme;
   if (!theme) return;
-  const json = JSON.stringify(theme);
+  // 强调色优先级：URL accent > 模组设置 > 应用主题。
+  const accentOverride = pick('accent');
+  const json = JSON.stringify(theme) + '|' + String(accentOverride || '');
   if (json === appliedThemeJson) return;
   appliedThemeJson = json;
   const daylight = theme.daylight === true;
-  const accent = cfg.accentProvided ? cfg.accent : (theme.accent || cfg.accent);
+  const accent = accentOverride || theme.accent || '#6ee7ff';
+  const themeAccent = accentOverride || theme.accent || accent;
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty('--accent', accent);
-  rootStyle.setProperty('--accent-soft', hexToRgba(theme.accent || accent, daylight ? 0.14 : 0.2));
+  rootStyle.setProperty('--accent-soft', hexToRgba(themeAccent, daylight ? 0.14 : 0.2));
   rootStyle.setProperty('--surface-strong', hexToRgba(theme.background || '#111218', daylight ? 0.9 : 0.82));
-  rootStyle.setProperty('--border', hexToRgba(theme.accent || accent, daylight ? 0.28 : 0.36));
+  rootStyle.setProperty('--border', hexToRgba(themeAccent, daylight ? 0.28 : 0.36));
   rootStyle.setProperty('--text', theme.primary || '#f5f5f7');
   rootStyle.setProperty('--muted', theme.secondary || '#b9bac4');
   rootStyle.setProperty('--shadow', '0 24px 80px ' + hexToRgba(theme.background || '#000000', 0.42));
@@ -1509,7 +1569,9 @@ const fetchJson = async (url, useAuth) => {
 const pollMod = async () => {
   const data = await fetchJson('/state', false);
   if (data && Array.isArray(data.requests)) modState = data;
+  modObs = (modState && modState.obs) || {};
   applyTheme();
+  currentLayout = applyLayout();
 };
 const pollStage = async () => {
   const data = await fetchJson(cfg.stageBase + '/stage/player/status', true);
@@ -1528,14 +1590,15 @@ const refreshRequesterMap = () => {
 const el = (id) => document.getElementById(id);
 const userIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
 
-let lastEntriesJson = '';
+const TT = () => T[currentLang || 'zh-CN'] || T['zh-CN'];
+
 const renderCard = (current, playing) => {
   const cover = current && current.coverUrl ? current.coverUrl : '';
   el('cardBg').style.backgroundImage = cover ? 'url("' + cover + '")' : 'none';
   el('cardCover').src = cover;
   el('cardCover').classList.toggle('hidden', !cover);
   el('cardPlaceholder').classList.toggle('hidden', Boolean(cover));
-  el('cardTitle').textContent = current ? current.title : T.idle;
+  el('cardTitle').textContent = current ? current.title : TT().idle;
   const sub = current ? [current.artist, current.album].filter(Boolean).join(' · ') : '';
   el('cardSub').textContent = sub;
   const requester = current ? requesterBySong.get(Number(current.id)) : null;
@@ -1569,7 +1632,7 @@ const renderList = (entries) => {
     if (entry.isPlaying) {
       const badge = document.createElement('span');
       badge.className = 'badge';
-      badge.textContent = T.playingBadge;
+      badge.textContent = TT().playingBadge;
       title.appendChild(badge);
     }
     const sub = document.createElement('div');
@@ -1591,8 +1654,9 @@ const renderList = (entries) => {
     row.appendChild(info);
     track.appendChild(row);
   }
+  el('emptyRow').textContent = TT().empty;
   el('emptyRow').classList.toggle('hidden', entries.length > 0);
-  el('listCount').textContent = entries.length > 0 ? T.count(entries.filter((e) => !e.isPlaying).length) : T.none;
+  el('listCount').textContent = entries.length > 0 ? TT().count(entries.filter((e) => !e.isPlaying).length) : TT().none;
 };
 
 const buildEntries = (current) => {
@@ -1638,14 +1702,17 @@ const renderProgress = () => {
 
 let scrollOffset = 0;
 let scrollDirection = 1;
+let currentLayout = null;
 const stepScroll = (deltaMs) => {
   const viewport = document.querySelector('#list .viewport');
   const track = el('track');
   if (!viewport || !track || track.children.length < 2) return;
   const overflow = track.scrollHeight - viewport.clientHeight;
   if (overflow <= 4) { track.style.transform = 'translateY(0)'; return; }
-  scrollOffset += (deltaMs / 1000) * cfg.speed * scrollDirection;
-  if (cfg.mode === 'loop') {
+  const speed = currentLayout ? currentLayout.speed : 18;
+  const mode = currentLayout ? currentLayout.mode : 'loop';
+  scrollOffset += (deltaMs / 1000) * speed * scrollDirection;
+  if (mode === 'loop') {
     if (scrollOffset >= overflow + 12) scrollOffset = -12;
     if (scrollOffset < -12) scrollOffset = overflow + 12;
   } else {
@@ -1711,7 +1778,6 @@ setInterval(() => { void tick(); }, 700);
             .replace(/CARD_BOTTOM_PLACEHOLDER/, '3%')
             .replace(/CARD_WIDTH_PLACEHOLDER/, '608px')
             .replace(/CARD_HEIGHT_PLACEHOLDER/, '168px')
-            .replace(/COVER_SIZE_PLACEHOLDER/, '96px')
             .replace(/LIST_LEFT_PLACEHOLDER/, '2%')
             .replace(/LIST_TOP_PLACEHOLDER/, '12%')
             .replace(/LIST_WIDTH_PLACEHOLDER/, '432px')
@@ -1736,6 +1802,7 @@ setInterval(() => { void tick(); }, 700);
                         requests: obsState.requests,
                         current: obsState.current,
                         theme: obsState.theme,
+                        obs: obsState.obs,
                         pushedAt: obsState.pushedAt,
                     }));
                     return;
@@ -1775,6 +1842,7 @@ setInterval(() => { void tick(); }, 700);
             if (Array.isArray(payload.requests)) obsState.requests = payload.requests.slice(0, 100);
             obsState.current = payload.current === undefined ? obsState.current : (payload.current || null);
             obsState.theme = payload.theme === undefined ? obsState.theme : (payload.theme || null);
+            obsState.obs = payload.obs === undefined ? obsState.obs : (payload.obs || null);
             obsState.pushedAt = Date.now();
         }
         return { ok: true };
