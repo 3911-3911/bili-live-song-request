@@ -1276,6 +1276,9 @@ module.exports = function activate(api) {
         current: null,
         theme: null,
         obs: null,
+        mode: null,
+        lastDanmu: null,
+        lastResult: null,
         pushedAt: 0,
     };
 
@@ -1850,6 +1853,9 @@ setInterval(() => { void tick(); }, 700);
                     res.end(JSON.stringify({
                         connection: obsState.connection,
                         roomId: obsState.roomId,
+                        mode: obsState.mode || null,
+                        lastDanmu: obsState.lastDanmu || null,
+                        lastResult: obsState.lastResult || null,
                         requests: obsState.requests,
                         current: obsState.current,
                         theme: obsState.theme,
@@ -1894,6 +1900,9 @@ setInterval(() => { void tick(); }, 700);
             obsState.current = payload.current === undefined ? obsState.current : (payload.current || null);
             obsState.theme = payload.theme === undefined ? obsState.theme : (payload.theme || null);
             obsState.obs = payload.obs === undefined ? obsState.obs : (payload.obs || null);
+            obsState.mode = payload.mode === undefined ? obsState.mode : (payload.mode || null);
+            obsState.lastDanmu = payload.lastDanmu === undefined ? obsState.lastDanmu : (payload.lastDanmu || null);
+            obsState.lastResult = payload.lastResult === undefined ? obsState.lastResult : (payload.lastResult || null);
             obsState.pushedAt = Date.now();
         }
         return { ok: true };

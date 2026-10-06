@@ -113,6 +113,9 @@ export default function activate(folium) {
                 current,
                 theme: latestTheme,
                 obs: buildObsPayload(),
+                mode: state.mode,
+                lastDanmu: state.lastDanmu,
+                lastResult: state.lastResult,
                 requests: state.requests.map((item) => ({
                     songId: item.songId,
                     title: item.title,
@@ -541,11 +544,11 @@ export default function activate(folium) {
             }
             if (!wantPlayNow && state.mode === 'chain') break;
             try {
-                // 首选分支模型：append + move(+select) 重排宿主队列；
-                // 宿主不允许队列编辑（舞台会话）时降级为链接模式。
-                const viaQueue = state.mode === 'queue'
-                    ? await applyRequestViaQueue(candidate.songId, wantPlayNow)
-                    : false;
+                // 分支模型：append + move(+select) 重排宿主队列；每次请求都
+                // 重新探测（applyRequestViaQueue 只在能力不可用时快速返回
+                // false），宿主不允许队列编辑（舞台会话）时降级为链接模式，
+                // 回到普通上下文后自动恢复。
+                const viaQueue = await applyRequestViaQueue(candidate.songId, wantPlayNow);
                 state.mode = viaQueue ? 'queue' : 'chain';
                 if (!viaQueue && wantPlayNow) {
                     if (!(state.playlistTail && state.playlistTail.length)) {
