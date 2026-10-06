@@ -1206,6 +1206,8 @@ const handleStageOp = async (op) => {
                 ...(op.songId !== undefined ? { songId: op.songId } : {}),
                 ...(op.songIds !== undefined ? { songIds: op.songIds } : {}),
                 ...(op.queueItemId !== undefined ? { queueItemId: op.queueItemId } : {}),
+                ...(op.index !== undefined ? { index: op.index } : {}),
+                ...(op.toIndex !== undefined ? { toIndex: op.toIndex } : {}),
             });
         case 'queueStatus':
             return stageRequest('GET', '/stage/player/queue?limit=200');
